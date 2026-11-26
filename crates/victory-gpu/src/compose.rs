@@ -11,7 +11,8 @@ use windows::core::{PCSTR, s};
 use crate::host::Host;
 
 const SOURCE: &str = r#"
-#define RS "DescriptorTable(SRV(t0, numDescriptors=2), visibility=SHADER_VISIBILITY_PIXEL), StaticSampler(s0, filter=FILTER_MIN_MAG_MIP_LINEAR, addressU=TEXTURE_ADDRESS_CLAMP, addressV=TEXTURE_ADDRESS_CLAMP)"
+#define RS "RootConstants(num32BitConstants=1, b0, visibility=SHADER_VISIBILITY_PIXEL), DescriptorTable(SRV(t0, numDescriptors=2), visibility=SHADER_VISIBILITY_PIXEL), StaticSampler(s0, filter=FILTER_MIN_MAG_MIP_LINEAR, addressU=TEXTURE_ADDRESS_CLAMP, addressV=TEXTURE_ADDRESS_CLAMP)"
+cbuffer Flags : register(b0) { uint flags; };
 Texture2D<float4> scene : register(t0);
 Texture2D<float4> over : register(t1);
 SamplerState smooth_ : register(s0);
@@ -23,11 +24,34 @@ V vs(uint id : SV_VertexID) {
     v.at = float4(v.uv * float2(2, -2) + float2(-1, 1), 0, 1);
     return v;
 }
+float3 linear_to_srgb(float3 x) {
+    x = saturate(x);
+    float3 lo = x * 12.92;
+    float3 hi = 1.055 * pow(max(x, 1e-6), 1.0 / 2.4) - 0.055;
+    return (x <= 0.0031308) ? lo : hi;
+}
+float3 srgb_to_linear(float3 x) {
+    x = saturate(x);
+    float3 lo = x / 12.92;
+    float3 hi = pow((x + 0.055) / 1.055, 2.4);
+    return (x <= 0.04045) ? lo : hi;
+}
 [RootSignature(RS)]
 float4 ps(V v) : SV_Target {
     float4 s = scene.SampleLevel(smooth_, v.uv, 0);
     float4 o = over.SampleLevel(smooth_, v.uv, 0);
-    float3 col = o.rgb + s.rgb * (1.0 - saturate(o.a));
+    // If Plane 0 was sampled as _SRGB (hardware decoded to linear), blend in
+    // linear space and re-encode to sRGB before writing the UNORM swapchain.
+    bool s_lin = (flags & 1u) != 0u;
+    bool o_lin = (flags & 2u) != 0u;
+    float3 col;
+    if (s_lin) {
+        float3 o_rgb = o_lin ? o.rgb : srgb_to_linear(o.rgb);
+        col = linear_to_srgb(o_rgb + s.rgb * (1.0 - saturate(o.a)));
+    } else {
+        float3 o_rgb = o_lin ? linear_to_srgb(o.rgb) : o.rgb;
+        col = o_rgb + s.rgb * (1.0 - saturate(o.a));
+    }
     // Subtle 1-LSB Interleaved Gradient Noise dithering breaks up 8-bit banding
     // rings in dark interiors and around bright ceiling lights.
     float ign = frac(52.9829189 * frac(dot(v.at.xy, float2(0.06711056, 0.00583715))));
@@ -168,12 +192,26 @@ impl Composer {
                 host.device
                     .CreateShaderResourceView(Some(plane.0), Some(&desc), at);
             }
+            let is_srgb = |fmt: DXGI_FORMAT| {
+                fmt == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || fmt == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+            };
+            let flags: u32 = u32::from(is_srgb(planes[0].1)) | (u32::from(is_srgb(planes[1].1)) << 1);
+            static LOGGED: std::sync::Once = std::sync::Once::new();
+            LOGGED.call_once(|| {
+                tracing::warn!(
+                    scene_fmt = planes[0].1.0,
+                    over_fmt = planes[1].1.0,
+                    srgb_flags = flags,
+                    "two-plane composer active"
+                );
+            });
             let rtv = host.rtv(Some(back), None);
             list.OMSetRenderTargets(1, Some(&rtv), false, None);
             list.SetDescriptorHeaps(&[Some(views.clone())]);
             list.SetGraphicsRootSignature(&self.root);
             list.SetPipelineState(&self.pso);
-            list.SetGraphicsRootDescriptorTable(0, gpu);
+            list.SetGraphicsRoot32BitConstant(0, flags, 0);
+            list.SetGraphicsRootDescriptorTable(1, gpu);
             list.IASetPrimitiveTopology(
                 windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
             );
@@ -326,5 +364,18 @@ mod tests {
             }
             eprintln!("D3D12 display-plane readback RGBA: {pixels:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod shader_tests {
+    use super::*;
+
+    #[test]
+    fn composer_shader_compiles_on_host_device() {
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        Composer::new(host, DXGI_FORMAT_R8G8B8A8_UNORM).expect("sRGB-aware composer must compile");
     }
 }
