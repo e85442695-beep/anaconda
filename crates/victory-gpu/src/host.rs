@@ -153,11 +153,22 @@ pub(crate) fn vram_keep(budget: u64, used: u64) -> (u64, u64) {
     const KEPT_MS: u64 = 600_000;
     const IDLE_MS: u64 = 5_000;
     const SHORT_MS: u64 = 1_500;
+    const FOUR_GIB: u64 = 4 << 30;
     if budget == 0 {
         return (IDLE_MS, u64::MAX);
     }
     let share = |percent: u64| budget / 100 * percent;
-    if used < share(88) {
+    // On <= 4 GiB GPUs (e.g. GTX 1650), evict idle loading/world textures earlier
+    // so character textures and render targets never starve for VRAM.
+    if budget <= FOUR_GIB {
+        if used < share(75) {
+            (30_000, u64::MAX)
+        } else if used < share(85) {
+            (3_000, used.saturating_sub(share(72)))
+        } else {
+            (1_000, used.saturating_sub(share(72)))
+        }
+    } else if used < share(88) {
         (KEPT_MS, u64::MAX)
     } else if used < share(95) {
         (IDLE_MS, used - share(85))
@@ -10677,6 +10688,11 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         assert_eq!((ms, bytes), (5_000, 5 * gib));
         assert_eq!(vram_keep(100 * gib, 120 * gib), (1_500, 35 * gib));
         assert_eq!(vram_keep(0, 7).0, 5_000);
+        // <= 4 GiB low-VRAM eviction curve
+        let b4 = 3 * gib;
+        assert_eq!(vram_keep(b4, b4 / 100 * 70).0, 30_000);
+        assert_eq!(vram_keep(b4, b4 / 100 * 80).0, 3_000);
+        assert_eq!(vram_keep(b4, b4 / 100 * 90).0, 1_000);
     }
 
     #[test]

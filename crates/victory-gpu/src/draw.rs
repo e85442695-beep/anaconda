@@ -2789,7 +2789,10 @@ impl State {
             // had its colour only in the launches that entered the world
             // under the line. `VICTORY_REUPLOAD_WHEN_FULL=0`: refused, as
             // before.
-            if !room {
+            // Never starve one-shot ped/character decoration bake draws on `!room`:
+            // a bake samples its inputs once and never retries, so refusing them
+            // leaves character skin/face/clothing permanently black on 4 GB GPUs.
+            if !room && !required && !baking && sync.is_none() {
                 let has_its_texture = reupload_when_full()
                     && heap.handle(index).is_some_and(|handle| host.texture_slot_made_from(index, handle));
                 if !has_its_texture {

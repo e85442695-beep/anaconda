@@ -1198,7 +1198,8 @@ impl Staging {
                 }
             }
         }
-        held
+        let max_dim = self.layout.desc.width.max(self.layout.desc.height);
+        crate::tiles::trim_held_levels(held, mips.len() as u32, max_dim)
     }
 
     /// Forgets what the staging buffer was last filled from: the next

@@ -127,17 +127,48 @@ fn shade() -> [f32; 2] {
     })
 }
 
+/// Fast half-grid ambient mode (`VICTORY_AMBIENT_FAST=1`): 16x cheaper gather
+/// (32x18 cells -> 80x45 points) and 4-tap crease AO for 4 GB / entry GPUs.
+fn fast() -> bool {
+    static FAST: OnceLock<bool> = OnceLock::new();
+    *FAST.get_or_init(|| std::env::var_os("VICTORY_AMBIENT_FAST").is_some_and(|v| v == "1"))
+}
+
+/// Minimum diffuse ambient floor so shadowed characters/faces indoors never
+/// crush to pitch black without hardware RT (`VICTORY_AMBIENT_FLOOR`, default
+/// `0.035` in fast mode, `0.0` otherwise).
+fn floor_level() -> f32 {
+    static FLOOR: OnceLock<f32> = OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        std::env::var("VICTORY_AMBIENT_FLOOR")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(if fast() { 0.035 } else { 0.0 })
+            .clamp(0.0, 1.0)
+    })
+}
+
 const SOURCE: &str = r#"
 #define RS "RootConstants(num32BitConstants=12, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2)"
+#ifdef FAST
+#define CX 32
+#define CY 18
+#define PX 80
+#define PY 45
+#define AO_TAPS 4
+#else
 #define CX 64
 #define CY 36
-#define CELLS (CX * CY)
 #define PX 160
 #define PY 90
+#define AO_TAPS 12
+#endif
+#define CELLS (CX * CY)
 cbuffer Set : register(b0) {
     float level; float constant; float strength; float radius;
     float near; float tan_y; uint width; uint height;
-    float follow; float most; float air; float unused;
+    float follow; float most; float air; float floor_min;
 };
 Texture2D<float> depth : register(t0);
 // Cells: the light they send out (then, at CELLS, the slow mean), from
@@ -160,6 +191,7 @@ RWTexture2D<float3> radiance : register(u0);
 [RootSignature(RS)]
 [numthreads(8, 4, 1)]
 void keep(uint3 at : SV_DispatchThreadID) {
+    if (at.x >= CX || at.y >= CY) return;
     uint w, h;
     radiance.GetDimensions(w, h);
     float3 sum = 0;
@@ -187,6 +219,7 @@ void mean() {
 [RootSignature(RS)]
 [numthreads(8, 4, 1)]
 void place(uint3 at : SV_DispatchThreadID) {
+    if (at.x >= CX || at.y >= CY) return;
     float2 size = float2(width, height);
     float3 p = seen(int2((float2(at.xy) + 0.5) * size / float2(CX, CY)), size);
     cells[CELLS + 1 + at.y * CX + at.x] = float4(p, p.z * p.z);
@@ -197,6 +230,7 @@ void place(uint3 at : SV_DispatchThreadID) {
 [RootSignature(RS)]
 [numthreads(8, 2, 1)]
 void gather(uint3 at : SV_DispatchThreadID) {
+    if (at.x >= PX || at.y >= PY) return;
     float2 size = float2(width, height);
     float3 p = seen(int2((float2(at.xy) + 0.5) * size / float2(PX, PY)), size);
     float r2 = 0.25 + 0.0025 * p.z * p.z;
@@ -281,7 +315,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float noise = frac(52.9829189 * frac(dot(float2(p), float2(0.06711056, 0.00583715))));
     if (strength > 0.0 && px >= 1.5 && c.z < 400.0) {
         float sum = 0.0;
-        const int N = 12;
+        const int N = AO_TAPS;
         for (int i = 0; i < N; i++) {
             float a = i * 2.399963 + noise * 6.2831853;
             float2 o = float2(cos(a), sin(a)) * (sqrt((i + 0.5) / N) * px);
@@ -320,6 +354,9 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = all + 1.2 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
     found = clamp(found, 0.2 * all, 2.5 * all);
     found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;
+    if (floor_min > 0.0) {
+        found = max(found, float3(1.0, 0.98, 0.95) * floor_min * open);
+    }
     float3 was = unpack(light[p]);
     // What the program left counts as far as it can be true: the sky's light
     // outdoors, not the blocks of other memory.
@@ -352,10 +389,15 @@ unsafe impl Send for Pass {}
 // SAFETY: as above.
 unsafe impl Sync for Pass {}
 
-fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -> windows::core::Result<Pass> {
+fn make_mode(
+    device: &ID3D12Device,
+    buffer: impl Fn(u64) -> Option<ID3D12Resource>,
+    is_fast: bool,
+) -> windows::core::Result<Pass> {
     let mut root: Option<ID3D12RootSignature> = None;
+    let fast_def = if is_fast { "#define FAST\n" } else { "" };
     let mut pipeline = |part: &str, entry| -> windows::core::Result<ID3D12PipelineState> {
-        let code = crate::host::compile(&format!("#define {part}\n{SOURCE}"), entry, s!("cs_5_1"))?;
+        let code = crate::host::compile(&format!("{fast_def}#define {part}\n{SOURCE}"), entry, s!("cs_5_1"))?;
         // SAFETY: the root signature is inside the shader; plain creations.
         unsafe {
             if root.is_none() {
@@ -387,6 +429,10 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
         cells: made(CELL_BYTES)?,
         points: made(POINT_BYTES)?,
     })
+}
+
+fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -> windows::core::Result<Pass> {
+    make_mode(device, buffer, fast())
 }
 
 fn pass() -> Option<&'static Pass> {
@@ -461,6 +507,8 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     words[8] = 0.04f32.to_bits();
     words[9] = 4.0f32.to_bits();
     words[10] = air().to_bits();
+    words[11] = floor_level().to_bits();
+    let (cell_gx, cell_gy, pt_gx, pt_gy) = if fast() { (4, 5, 10, 23) } else { (8, 9, 20, 45) };
     let l = &list.list;
     // SAFETY: an open list with the heap of the views set; the title's
     // program has just used both views, so their textures are in the states
@@ -480,15 +528,15 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
         };
         match role {
             Role::Radiance => {
-                run(&pass.keep, 8, 9, 1);
+                run(&pass.keep, cell_gx, cell_gy, 1);
                 run(&pass.mean, 1, 1, 1);
                 KEPT.store(true, Ordering::Relaxed);
             }
             Role::Air => run(&pass.air, views.size[0].div_ceil(8), views.size[1].div_ceil(8), views.slices.div_ceil(2)),
             Role::Resolve => {
                 if constant == 0.0 {
-                    run(&pass.place, 8, 9, 1);
-                    run(&pass.gather, 20, 45, 1);
+                    run(&pass.place, cell_gx, cell_gy, 1);
+                    run(&pass.gather, pt_gx, pt_gy, 1);
                 }
                 run(&pass.raise, views.size[0].div_ceil(8), views.size[1].div_ceil(8), 1);
             }
@@ -525,6 +573,7 @@ mod tests {
         let Some(host) = host() else {
             return;
         };
-        make(&host.device, |bytes| host.uav_buffer(bytes)).expect("the passes");
+        make_mode(&host.device, |bytes| host.uav_buffer(bytes), false).expect("default passes");
+        make_mode(&host.device, |bytes| host.uav_buffer(bytes), true).expect("fast passes");
     }
 }

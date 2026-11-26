@@ -120,6 +120,58 @@ pub(crate) fn floor() -> u64 {
     *BYTES.get_or_init(|| parse_floor(std::env::var("VICTORY_LEVELS_MIN_KB").ok().as_deref()))
 }
 
+/// Optional top-mip drop for large tiled 2D textures (`VICTORY_TILES_DROP=1..=3`,
+/// `VICTORY_TILES_DROP_MIN=512`). Because tiled resources keep their full mip
+/// chain and `show_from()` points views at the first mapped mip, skipping top
+/// mips saves 75-87% VRAM and CPU detiling without any subresource mismatch.
+fn trim_held_levels_for(held: u32, levels: u32, max_dim: u32, drop: u32, min_dim: u32) -> u32 {
+    if drop == 0 || held == 0 || levels <= 1 || max_dim < min_dim {
+        return held;
+    }
+    let mut trimmed = held;
+    for level in 0..drop.min(levels.saturating_sub(1)).min(31) {
+        let dim = max_dim >> level;
+        if dim < min_dim {
+            break;
+        }
+        let next = trimmed & !(1u32 << level);
+        if next == 0 {
+            break;
+        }
+        trimmed = next;
+    }
+    trimmed
+}
+
+pub(crate) fn trim_held_levels(held: u32, levels: u32, max_dim: u32) -> u32 {
+    static CFG: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    let &(drop, min_dim) = CFG.get_or_init(|| {
+        let drop = std::env::var("VICTORY_TILES_DROP")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+            .min(3);
+        let min_dim = std::env::var("VICTORY_TILES_DROP_MIN")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(512)
+            .max(128);
+        if drop > 0 {
+            tracing::warn!(drop, min_dim, "tiled top-mip drop active (VICTORY_TILES_DROP)");
+        }
+        (drop, min_dim)
+    });
+    trim_held_levels_for(held, levels, max_dim, drop, min_dim)
+}
+
+/// When `VICTORY_TILES_TAIL_ALWAYS=1`, allow mapping the tiny packed mip tail
+/// (<= 2 tiles = 128 KiB) even when VRAM is tight so character/world textures
+/// never render solid black.
+fn tail_always() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_TILES_TAIL_ALWAYS").is_some_and(|v| v == "1"))
+}
+
 /// The bytes of the tiles given to textures now: the card's memory they
 /// hold (`resource.rs` `room` counts it with the other host copies).
 pub(crate) fn given_total() -> u64 {
@@ -378,7 +430,17 @@ impl Tiled {
         let named = held | card;
         // The levels the card itself writes are few and are not kept
         // waiting: a write of the card's into no memory is lost.
-        let changed = self.give_locked(&mut given, queue, device, texture, named, if room { named } else { card });
+        // With `VICTORY_TILES_TAIL_ALWAYS=1`, also allow the tiny packed tail
+        // (<= 128 KiB) when `!room` so no tiled texture stays pitch black.
+        let mut may = if room { named } else { card };
+        if !room && tail_always() && !given.packed && self.packed > 0 && self.packed <= 2 {
+            let first_packed = self.standard.len() as u32;
+            if first_packed < self.levels && first_packed < 32 {
+                let tail_mask = self.every_level() & !((1u32 << first_packed) - 1);
+                may |= held & tail_mask;
+            }
+        }
+        let changed = self.give_locked(&mut given, queue, device, texture, named, may);
         let missing = self.without_locked(&given, named) != 0;
         (changed, missing)
     }
@@ -1583,5 +1645,21 @@ void look() {
         assert!(!changed && waiting);
         assert!(!tiled.has_tiles(0));
         assert_eq!(tiled.given_bytes(), 0);
+    }
+
+    #[test]
+    fn trim_held_levels_drops_only_large_top_mips_and_never_empties() {
+        // 2048x2048 with 12 mips: drop=2 with min_dim=512 drops mips 0 (2048) and 1 (1024), keeps 2 (512)..11
+        let all12 = (1u32 << 12) - 1;
+        assert_eq!(trim_held_levels_for(all12, 12, 2048, 2, 512), all12 & !0b11);
+        // 512x512 with min_dim=512 and drop=2 drops mip 0 (512) and stops at mip 1 (256 < 512)
+        assert_eq!(trim_held_levels_for(0b111111, 10, 512, 2, 512), 0b111110);
+        // 256x256 is below min_dim=512: untouched
+        assert_eq!(trim_held_levels_for(0b11111, 9, 256, 2, 512), 0b11111);
+        // Never drops the only held mip (prevents black texture)
+        assert_eq!(trim_held_levels_for(0b1, 10, 2048, 2, 512), 0b1);
+        assert_eq!(trim_held_levels_for(0b10, 10, 2048, 2, 512), 0b10);
+        // Disabled when drop=0
+        assert_eq!(trim_held_levels_for(all12, 12, 2048, 0, 512), all12);
     }
 }

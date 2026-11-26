@@ -57,7 +57,13 @@ Texture2D<float4> src : register(t0);
 RWTexture2D<float4> dst : register(u0);
 SamplerState samp : register(s0);
 
-// Fast FSR-inspired 5-tap Catmull-Rom / bicubic-lite + RCAS contrast-adaptive sharpening
+// Sanitize HDR (R16G16B16A16_FLOAT) texels so NaN/Inf from dropped/buggy
+// shaders never spread black 3x3 blocks through the 5-tap RCAS filter.
+float3 safe_hdr(float3 v) {
+    return (any(isnan(v)) || any(isinf(v))) ? float3(0.0, 0.0, 0.0) : clamp(v, 0.0, 65504.0);
+}
+
+// Fast FSR-inspired 5-tap RCAS contrast-adaptive sharpening + NaN guard
 [RootSignature(RS)]
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -68,11 +74,13 @@ void main(uint3 id : SV_DispatchThreadID) {
     uv = clamp(uv, min_uv, max_uv);
 
     float4 c = src.SampleLevel(samp, uv, 0.0);
+    c.rgb = safe_hdr(c.rgb);
+    c.a = (isnan(c.a) || isinf(c.a)) ? 1.0 : saturate(c.a);
     if (sharpness > 0.001) {
-        float3 n = src.SampleLevel(samp, clamp(uv + float2(0.0, -inv_src.y), min_uv, max_uv), 0.0).rgb;
-        float3 s = src.SampleLevel(samp, clamp(uv + float2(0.0,  inv_src.y), min_uv, max_uv), 0.0).rgb;
-        float3 w = src.SampleLevel(samp, clamp(uv + float2(-inv_src.x, 0.0), min_uv, max_uv), 0.0).rgb;
-        float3 e = src.SampleLevel(samp, clamp(uv + float2( inv_src.x, 0.0), min_uv, max_uv), 0.0).rgb;
+        float3 n = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(0.0, -inv_src.y), min_uv, max_uv), 0.0).rgb);
+        float3 s = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(0.0,  inv_src.y), min_uv, max_uv), 0.0).rgb);
+        float3 w = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(-inv_src.x, 0.0), min_uv, max_uv), 0.0).rgb);
+        float3 e = safe_hdr(src.SampleLevel(samp, clamp(uv + float2( inv_src.x, 0.0), min_uv, max_uv), 0.0).rgb);
         float3 mn = min(c.rgb, min(min(n, s), min(w, e)));
         float3 mx = max(c.rgb, max(max(n, s), max(w, e)));
         float3 avg = (n + s + w + e) * 0.25;
@@ -365,4 +373,17 @@ pub(crate) fn upscale_builtin_now(
         crate::list::ensure_state(host_list, output, output_state);
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_upscaler_shader_compiles_on_host_device() {
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        BuiltinUpscaler::new(&host.device).expect("built-in FSR+RCAS shader must compile");
+    }
 }

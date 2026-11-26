@@ -75,8 +75,8 @@
     <versionMinor value="0" />
     <uiOverlay value="true" />
     <uiResolution>
-      <width value="3840" />
-      <height value="2160" />
+      <width value="1920" />
+      <height value="1080" />
     </uiResolution>
     <adapterIndex value="0" />
     <outputIndex value="0" />
@@ -85,8 +85,8 @@
       <denominator value="1" />
     </refreshRate>
     <resolutionFullscreen>
-      <width value="1920" />
-      <height value="1080" />
+      <width value="1280" />
+      <height value="720" />
     </resolutionFullscreen>
     <tripleBuffered value="false" />
     <frameRateLimit value="30" />
