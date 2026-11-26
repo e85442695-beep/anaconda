@@ -38,7 +38,9 @@ if not defined VICTORY_LIBRARY_LOCK set "VICTORY_LIBRARY_LOCK=1"
 if not defined VICTORY_LIBRARY_MAP set "VICTORY_LIBRARY_MAP=0"
 if not defined VICTORY_VSYNC set "VICTORY_VSYNC=1"
 
-rem 3. No hardware Ray Tracing: 16x faster dithered ambient GI + clean indoor fog cap
+rem 3. No hardware Ray Tracing: zero-VRAM No-RT path + 16x faster dithered ambient GI + clean indoor fog cap
+if not defined VICTORY_RT_NO_ARENAS set "VICTORY_RT_NO_ARENAS=1"
+if not defined VICTORY_MEMORY_CARD_MB set "VICTORY_MEMORY_CARD_MB=0"
 if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=0.75"
 if not defined VICTORY_AMBIENT_FAST set "VICTORY_AMBIENT_FAST=1"
 if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.015"

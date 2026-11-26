@@ -211,6 +211,82 @@ unsafe impl Send for Memory {}
 
 static MEMORY: Mutex<Option<Memory>> = Mutex::new(None);
 
+/// Zero-VRAM, zero-arena No-RT fast path (`VICTORY_RT_NO_ARENAS=1` while
+/// `builder_runs()` is false): hands hybrid shaders an all-zero directory in
+/// shared memory and a null view run with zero Dedicated VRAM, zero 64 MiB RT
+/// arenas, zero fault readbacks, and zero per-list write-watch scans.
+struct NullRt {
+    directory: ID3D12Resource,
+    directory_gpu: u64,
+    faults: ID3D12Resource,
+    faults_gpu: u64,
+    heaps: HashMap<usize, u32>,
+}
+
+// SAFETY: D3D12 buffers are free-threaded; map access is under `NULL_RT`.
+unsafe impl Send for NullRt {}
+
+static NULL_RT: Mutex<Option<NullRt>> = Mutex::new(None);
+
+fn no_rt_arenas() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_RT_NO_ARENAS").is_some_and(|v| v == "1"))
+        && !crate::pipeline::builder_runs()
+}
+
+fn ready_null_rt(list: &HostList, heap: &HostHeap) -> Option<Ready> {
+    let mut guard = NULL_RT.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        let host = host()?;
+        let dir_bytes = u64::from(MEMORY_PAGES) * 8;
+        let (directory, dir_data) = host.shared_buffer(dir_bytes)?;
+        let fault_bytes = u64::from(MEMORY_FAULTS) * 4;
+        let (faults, fault_data) = host.shared_buffer(fault_bytes)?;
+        // SAFETY: freshly mapped CPU-visible buffers of exact sizes.
+        let (directory_gpu, faults_gpu) = unsafe {
+            std::ptr::write_bytes(dir_data, 0, dir_bytes as usize);
+            std::ptr::write_bytes(fault_data, 0, fault_bytes as usize);
+            (directory.GetGPUVirtualAddress(), faults.GetGPUVirtualAddress())
+        };
+        crate::host::name(&directory, || "no-RT null directory".into());
+        crate::host::name(&faults, || "no-RT null faults".into());
+        tracing::warn!(
+            directory_mib = dir_bytes >> 20,
+            "title memory by address: No-RT zero-arena fast path active (VICTORY_RT_NO_ARENAS=1)"
+        );
+        *guard = Some(NullRt {
+            directory,
+            directory_gpu,
+            faults,
+            faults_gpu,
+            heaps: HashMap::new(),
+        });
+    }
+    let n = guard.as_mut()?;
+    let key = std::ptr::from_ref(heap) as usize;
+    let base = match n.heaps.get(&key) {
+        Some(&base) => base,
+        None => {
+            let base = heap.dynamic(COPIES + 1)?;
+            for i in 0..=COPIES {
+                heap.null_raw_uav_at(base + i);
+            }
+            n.heaps.insert(key, base);
+            base
+        }
+    };
+    const READ: usize = usize::MAX - 0x6d;
+    if list.first_use(READ) {
+        list.keep(&n.directory);
+        list.keep(&n.faults);
+    }
+    Some(Ready {
+        directory: n.directory_gpu,
+        faults: n.faults_gpu,
+        base,
+    })
+}
+
 /// What a draw binds.
 pub(crate) struct Ready {
     pub(crate) directory: u64,
@@ -903,6 +979,9 @@ pub(crate) fn ready(
     use_: Use,
     threads: Option<[u32; 3]>,
 ) -> Option<Ready> {
+    if use_ == Use::Reads && no_rt_arenas() {
+        return ready_null_rt(list, heap);
+    }
     let mut guard = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Memory::new();

@@ -42,8 +42,13 @@ static SPARES: AtomicUsize = AtomicUsize::new(SPARE);
 /// [`SPARE_KEPT`] below 85 % ([`crate::host::keep_freed`]), else [`SPARE`].
 /// Asked once a second.
 pub(crate) fn room(memory: Option<[u64; 4]>) {
+    const FOUR_GIB: u64 = 4 << 30;
     let pressure = crate::residency::pressured();
-    let limit = spares(memory, crate::host::keep_freed() && !pressure);
+    let low_vram = memory.is_some_and(|[budget, ..]| budget <= FOUR_GIB);
+    let mut limit = spares(memory, crate::host::keep_freed() && !pressure);
+    if low_vram {
+        limit = limit.min(SPARE);
+    }
     SPARES.store(limit, Ordering::Relaxed);
     let tick = now();
     // A full pool can become idle while another subsystem needs the VRAM.
@@ -56,8 +61,10 @@ pub(crate) fn room(memory: Option<[u64; 4]>) {
             0
         } else if pressure {
             1
+        } else if low_vram || crate::residency::limited_host_ram() {
+            limit.min(SPARE)
         } else {
-            limit
+            limit.min(STAGING_KEPT)
         };
         pool.reclaim(tick, staging_limit, true);
     }
