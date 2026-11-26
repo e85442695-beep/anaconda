@@ -18,10 +18,10 @@ if not exist "%runner%" (
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\Anaconda\cache"
 if not defined VICTORY_DATA_DIR set "VICTORY_DATA_DIR=%LOCALAPPDATA%\Anaconda\data-s"
 
-rem 1. Proven crash-free 4 GB VRAM cap (leaves GDDR5 room for render targets, no TDR)
+rem 1. Proven crash-free 4 GB VRAM cap (leaves GDDR5 room for render targets, no TDR/OOM)
 if not defined VICTORY_VRAM_MB set "VICTORY_VRAM_MB=3050"
 if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
-if not defined VICTORY_TEXTURE_BUDGET_MB set "VICTORY_TEXTURE_BUDGET_MB=950"
+if not defined VICTORY_TEXTURE_BUDGET_MB set "VICTORY_TEXTURE_BUDGET_MB=1150"
 if not defined VICTORY_TILES_DROP set "VICTORY_TILES_DROP=0"
 if not defined VICTORY_TILES_TAIL_ALWAYS set "VICTORY_TILES_TAIL_ALWAYS=1"
 if not defined VICTORY_TEXTURE_DROP set "VICTORY_TEXTURE_DROP=0"

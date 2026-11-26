@@ -2365,7 +2365,8 @@ impl State {
                         );
                     }
                     BAKE_SERVED.store(0, Ordering::Relaxed);
-                    PASS_BUDGET.set(Some((left, 2 << 30, true)));
+                    let bake_cap = if crate::residency::limited_host_ram() { 128 << 20 } else { 2 << 30 };
+                    PASS_BUDGET.set(Some((left, bake_cap, true)));
                     served = self.heap_textures(bake_list, heap, host, Some(&mut sync));
                     PASS_BUDGET.set(None);
                 }
@@ -2404,7 +2405,8 @@ impl State {
                 }
             }
             EARLY_TEXTURE_PASSES[1].fetch_add(1, Ordering::Relaxed);
-            PASS_BUDGET.set(Some((left, 2 << 30, true)));
+            let bake_cap = if crate::residency::limited_host_ram() { 128 << 20 } else { 2 << 30 };
+            PASS_BUDGET.set(Some((left, bake_cap, true)));
             crate::texture::BAKING.set(exact);
             let _ = self.heap_textures(list, heap, host, None);
             crate::texture::BAKING.set(false);
@@ -2789,10 +2791,7 @@ impl State {
             // had its colour only in the launches that entered the world
             // under the line. `VICTORY_REUPLOAD_WHEN_FULL=0`: refused, as
             // before.
-            // Never starve one-shot ped/character decoration bake draws on `!room`:
-            // a bake samples its inputs once and never retries, so refusing them
-            // leaves character skin/face/clothing permanently black on 4 GB GPUs.
-            if !room && !required && !baking && sync.is_none() {
+            if !room {
                 let has_its_texture = reupload_when_full()
                     && heap.handle(index).is_some_and(|handle| host.texture_slot_made_from(index, handle));
                 if !has_its_texture {
