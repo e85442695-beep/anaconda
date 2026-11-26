@@ -8638,7 +8638,28 @@ fn swap_format(format: DXGI_FORMAT) -> Option<DXGI_FORMAT> {
     })
 }
 
-const BUFFERS: u32 = 2;
+pub(crate) fn vram_target() -> Option<u64> {
+    static TARGET: OnceLock<Option<u64>> = OnceLock::new();
+    *TARGET.get_or_init(|| {
+        let mb = std::env::var("VICTORY_VRAM_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())?;
+        let mb = mb.clamp(512, 65_536);
+        tracing::warn!(mib = mb, "local VRAM target cap active (VICTORY_VRAM_MB)");
+        Some(mb << 20)
+    })
+}
+
+const BUFFERS: u32 = 3;
+
+fn vsync_interval() -> u32 {
+    static INTERVAL: OnceLock<u32> = OnceLock::new();
+    *INTERVAL.get_or_init(|| match std::env::var("VICTORY_VSYNC").ok().as_deref().map(str::trim) {
+        Some("0") => 0,
+        Some("2") => 2,
+        _ => 1,
+    })
+}
 
 struct Presenter {
     swap_chain: IDXGISwapChain3,
@@ -9256,7 +9277,7 @@ impl Host {
             #[cfg(feature = "diagnostics")]
             crate::replay::record::present(texture, state);
             let mut showing = crate::timeline::span("the host's Present");
-            let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            let _ = p.swap_chain.Present(vsync_interval(), DXGI_PRESENT(0));
             showing.next("the frame meter");
             #[cfg(feature = "diagnostics")]
             p.panel.frame(p.meter.line_due());
@@ -9405,7 +9426,8 @@ impl Host {
             );
             self.log_video_memory("right after that change");
         }
-        Some([own.Budget, own.CurrentUsage, shared.Budget, shared.CurrentUsage])
+        let budget = vram_target().map_or(own.Budget, |t| own.Budget.min(t));
+        Some([budget, own.CurrentUsage, shared.Budget, shared.CurrentUsage])
     }
 
     /// Both of the system's memory groups for this process, in bytes: for

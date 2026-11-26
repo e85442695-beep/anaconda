@@ -4242,7 +4242,9 @@ fn make_twinned(
                 if copy.base > 0
                     && let Some(desc) = &mut desc
                 {
-                    from_base(desc, copy.base);
+                    // SAFETY: live host texture.
+                    let host_mips = u32::from(unsafe { texture.GetDesc() }.MipLevels).max(1);
+                    from_base(desc, copy.base, host_mips);
                 }
                 // SAFETY: a live texture and a slot of our heap.
                 unsafe {
@@ -4384,16 +4386,17 @@ fn make_twinned(
 /// The view `desc` of a texture, of a host copy of its levels from `base`
 /// on (`crate::resource::held_only`). What it shows of larger ones, if any,
 /// is left out.
-fn from_base(desc: &mut D3D12_SHADER_RESOURCE_VIEW_DESC, base: u32) {
+fn from_base(desc: &mut D3D12_SHADER_RESOURCE_VIEW_DESC, base: u32, host_mips: u32) {
     if desc.ViewDimension != D3D12_SRV_DIMENSION_TEXTURE2D {
         return;
     }
     // SAFETY: the member its dimension says.
     let t = unsafe { &mut desc.Anonymous.Texture2D };
     let lost = base.saturating_sub(t.MostDetailedMip);
-    t.MostDetailedMip = t.MostDetailedMip.saturating_sub(base);
-    if t.MipLevels != u32::MAX {
-        t.MipLevels = t.MipLevels.saturating_sub(lost).max(1);
+    t.MostDetailedMip = t.MostDetailedMip.saturating_sub(base).min(host_mips - 1);
+    if t.MipLevels != u32::MAX && t.MipLevels != 0 {
+        let max_left = (host_mips - t.MostDetailedMip).max(1);
+        t.MipLevels = t.MipLevels.saturating_sub(lost).clamp(1, max_left);
     }
     t.ResourceMinLODClamp = (t.ResourceMinLODClamp - base as f32).max(0.0);
 }
@@ -4866,7 +4869,7 @@ mod tests {
         let view = |first, levels, clamp| {
             let mut desc = srv_desc(&[98, 4, 5768, 0, first, levels, 0, 0, 0, 0]);
             desc.Anonymous.Texture2D.ResourceMinLODClamp = clamp;
-            from_base(&mut desc, 3);
+            from_base(&mut desc, 3, 10);
             // SAFETY: the member its dimension says.
             let t = unsafe { desc.Anonymous.Texture2D };
             (t.MostDetailedMip, t.MipLevels, t.ResourceMinLODClamp)

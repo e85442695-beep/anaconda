@@ -78,6 +78,13 @@ pub fn run(
         image.base(),
         image.info().image_base
     );
+    victory_hle::console::set(match console {
+        Console::SeriesX => victory_hle::console::Console::SeriesX,
+        Console::SeriesS => victory_hle::console::Console::SeriesS,
+    });
+    println!("console        {}", victory_hle::console::current().name());
+    #[cfg(windows)]
+    victory_hle::modules::fidelityfx::init();
     let resolver = HleResolver::new(if strict {
         HostPolicy::none()
     } else {
@@ -101,11 +108,6 @@ pub fn run(
     let temp = cfg.data_subdir(&format!("{:08X}/temp", title.id))?;
     victory_hle::modules::files::mount_at('T', &temp);
     victory_hle::runtime::set_title(victory_hle::runtime::Title { storage, ..title });
-    victory_hle::console::set(match console {
-        Console::SeriesX => victory_hle::console::Console::SeriesX,
-        Console::SeriesS => victory_hle::console::Console::SeriesS,
-    });
-    println!("console        {}", victory_hle::console::current().name());
     let dlls = victory_loader::load_title_dlls(image.info(), title_dir, &images, &wanted)?;
     for (name, dll) in &dlls {
         println!("title dll      {name} at {:#x}", dll.base());

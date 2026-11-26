@@ -149,7 +149,7 @@ const _: () = assert!(offset_of!(List, pipeline_shadow) + 32 == 0x560);
 /// Runs `f` with the host list and draw state of a title list, if there
 /// is a host GPU.
 #[cfg(windows)]
-fn with_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State)) {
+pub(crate) fn with_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State)) {
     let Some(list) = host_list(this) else { return };
     #[cfg(feature = "diagnostics")]
     let started = std::time::Instant::now();
@@ -914,6 +914,12 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
             if unlike(dst, src) {
                 return;
             }
+            // Guard against CopyResource shape mismatch when one texture dropped top mips.
+            // SAFETY: live host resources.
+            let (td, fd) = unsafe { (to.GetDesc(), from.GetDesc()) };
+            if td.Width != fd.Width || td.Height != fd.Height || td.MipLevels != fd.MipLevels {
+                return;
+            }
             // Two title textures over the same memory have one host
             // texture between them: the copy would be of that texture onto
             // itself, which the host does not allow, and it would change
@@ -1042,6 +1048,15 @@ extern "system" fn copy_texture_region(
         if unlike(dst.resource, src.resource) {
             return;
         }
+        let dst_base = crate::resource::made_copy(dst.resource).map_or(0, |c| c.base);
+        let mut to_location = dst;
+        if dst.kind != FOOTPRINT && dst_base > 0 {
+            let sub = dst.footprint.offset as u32;
+            if sub < dst_base {
+                return;
+            }
+            to_location.footprint.offset = u64::from(sub - dst_base);
+        }
         let mut from = src;
         // Both sides are the same subresource of one host texture (set below).
         let mut same = false;
@@ -1081,6 +1096,14 @@ extern "system" fn copy_texture_region(
             let Some(texture) = crate::resource::host_resource(src.resource) else {
                 return;
             };
+            let src_base = crate::resource::made_copy(src.resource).map_or(0, |c| c.base);
+            if src_base > 0 {
+                let sub = src.footprint.offset as u32;
+                if sub < src_base {
+                    return;
+                }
+                from.footprint.offset = u64::from(sub - src_base);
+            }
             // The same subresource of one host texture on both sides (two
             // title textures over one memory): not a copy the host allows.
             // The states and the copy are left out below; the rest is
@@ -1088,7 +1111,7 @@ extern "system" fn copy_texture_region(
             same = texture.as_raw() == to.as_raw()
                 && src.kind != FOOTPRINT
                 && dst.kind != FOOTPRINT
-                && src.footprint.offset as u32 == dst.footprint.offset as u32;
+                && from.footprint.offset as u32 == to_location.footprint.offset as u32;
             list.twin_use(src.resource, false, false);
             if crate::texture::title_written(texture) {
                 crate::texture::upload(list, src.resource, texture);
@@ -1138,14 +1161,13 @@ extern "system" fn copy_texture_region(
         // of this list (`crate::tiles`): the title's bake copies each level
         // of its result into a block-compressed texture of that kind, and
         // a copy into a level without memory is dropped.
-        crate::texture::card_writes(list, dst.resource, to, Some(dst.footprint.offset as u32));
+        crate::texture::card_writes(list, dst.resource, to, Some(to_location.footprint.offset as u32));
         crate::texture::host_written(dst.resource);
         if same {
             SELF_COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return;
         }
         ensure_state(list, dst.resource, COPY_DEST);
-        let mut to_location = dst;
         to_location.resource = to.as_raw().cast_const().cast();
         let host_box = (!source_box.is_null()).then(|| source_box.cast::<D3D12_BOX>());
         #[cfg(feature = "diagnostics")]

@@ -469,6 +469,34 @@ const TARGETS: u64 = after(13);
 const CLEAR_RTV: u64 = after(14);
 const CLEAR_DSV: u64 = after(15);
 const COPY_TEXTURE: u64 = after(16);
+const BUILTIN_UPSCALE: u64 = after(17);
+
+/// Records a built-in FidelityFX compute upscale into a thin list when
+/// `VICTORY_THIN=1` is active; returns `false` if lists record immediately.
+pub(crate) fn record_upscale(
+    this: This,
+    color: This,
+    color_state: u32,
+    output: This,
+    output_state: u32,
+    render: [u32; 2],
+    out_size: [u32; 2],
+) -> bool {
+    if !on() {
+        return false;
+    }
+    front(this).put(
+        BUILTIN_UPSCALE,
+        &[
+            color as u64,
+            output as u64,
+            u64::from(color_state) | (u64::from(output_state) << 32),
+            u64::from(render[0]) | (u64::from(render[1]) << 32),
+            u64::from(out_size[0]) | (u64::from(out_size[1]) << 32),
+        ],
+    );
+    true
+}
 
 /// The bytes of `count` things at `items` (none if null).
 fn bytes_of<'a, T>(items: *const T, count: usize) -> &'a [u8] {
@@ -777,6 +805,17 @@ fn translate(list: This, stream: &[u64], left: impl Fn() -> bool) -> (u64, bool)
                     w[1] as u32,
                     at_or(w, 2 + step),
                     at(w, 2 + 2 * step, boxed),
+                );
+            }
+            BUILTIN_UPSCALE if w.len() >= 5 => {
+                crate::external::upscale_builtin_now(
+                    list,
+                    w[0] as This,
+                    w[2] as u32,
+                    w[1] as This,
+                    (w[2] >> 32) as u32,
+                    [w[3] as u32, (w[3] >> 32) as u32],
+                    [w[4] as u32, (w[4] >> 32) as u32],
                 );
             }
             _ => {}

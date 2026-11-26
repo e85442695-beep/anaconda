@@ -1265,12 +1265,42 @@ pub(crate) fn read_from(layout: &victory_formats::texture::Layout, first: u32) -
     if layout.bytes_from(first) < layout.size { first } else { 0 }
 }
 
+/// Minimum mip levels to drop from large title-filled 2D textures on 4 GB VRAM
+/// GPUs (`VICTORY_TEXTURE_DROP=1..=3`, `VICTORY_TEXTURE_DROP_MIN=512`).
+/// Integrates directly with `base_level` / `held_only` so dropped top mips are
+/// never allocated on the GPU, never detiled, and never uploaded.
+#[cfg(windows)]
+fn drop_floor(desc: &ResourceDesc) -> u32 {
+    static CFG: std::sync::OnceLock<(u32, u64)> = std::sync::OnceLock::new();
+    let &(levels, least) = CFG.get_or_init(|| {
+        let levels = std::env::var("VICTORY_TEXTURE_DROP")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+            .min(3);
+        let least = std::env::var("VICTORY_TEXTURE_DROP_MIN")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(512);
+        if levels > 0 {
+            tracing::warn!(levels, least, "texture mip-drop active (VICTORY_TEXTURE_DROP)");
+        }
+        (levels, least)
+    });
+    if levels == 0 || desc.width.max(u64::from(desc.height)) < least {
+        0
+    } else {
+        levels
+    }
+}
+
 /// The level a host copy begins at for views that start at `first`: one the
 /// host can have as a texture's level 0 ([`read_from`]; block-compressed
 /// formats in whole blocks).
 #[cfg(windows)]
 fn base_level(desc: &ResourceDesc, first: u32) -> u32 {
     const TEXTURE_2D: u32 = 3;
+    let first = first.max(drop_floor(desc));
     if first == 0
         || !fills(desc)
         || desc.dimension != TEXTURE_2D
@@ -1574,15 +1604,19 @@ fn hosted(this: This, make: bool) -> Option<Made> {
                 texture = reserved;
             }
         }
-        // The levels views show ([`held_only`]), those of the slots shaders
-        // pick by index among them.
+        // The levels views show ([`held_only`]), plus any configured mip drop
+        // floor (`VICTORY_TEXTURE_DROP`) — strictly for placed textures so
+        // committed render/bake atlases keep their exact subresource layout.
         let mut base = 0;
         if shape_fits && r.host.placed.load(Relaxed) && held_only() && alias_of(this).is_none() {
             let wanted = r.host.wanted.load(Relaxed);
             let viewed = crate::descriptor::host::first_viewed(r.data() as u64).unwrap_or(u32::MAX);
             let first = wanted.min(viewed);
+            let floor = drop_floor(&r.desc);
             if first != u32::MAX {
-                base = base_level(&r.desc, first);
+                base = base_level(&r.desc, first.max(floor));
+            } else if floor > 0 {
+                base = base_level(&r.desc, floor);
             }
         }
         let texture = match texture {

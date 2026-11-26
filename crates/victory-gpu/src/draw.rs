@@ -1042,6 +1042,15 @@ impl State {
         self.pipeline = pipeline as usize;
     }
 
+    /// Clears cached host pipeline/root/heap bindings after external GPU work
+    /// (such as the built-in FidelityFX upscaler) recorded into the host list.
+    pub(crate) fn host_state_lost(&mut self) {
+        self.host_pipeline = 0;
+        self.host_roots = [0; 2];
+        self.host_heaps = [0; 2];
+        self.host_heaps_set = false;
+    }
+
     /// The title's topology; console-only ones become host lists (see
     /// [`crate::primitive`]).
     pub(crate) fn set_topology(&mut self, list: &HostList, topology: u32) {
