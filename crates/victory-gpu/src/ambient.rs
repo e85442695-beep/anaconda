@@ -287,13 +287,13 @@ RWTexture2D<uint> light : register(u0);
 float3 unpack(uint v) {
     return float3(v & 511, (v >> 9) & 511, (v >> 18) & 511) * exp2(float(v >> 27) - 24.0);
 }
-uint pack(float3 c) {
+uint pack(float3 c, float dither) {
     c = clamp(c, 0.0, 65408.0);
     float top = max(c.r, max(c.g, c.b));
     int e = clamp(int(floor(log2(max(top, 1e-9)))) + 16, 0, 31);
     float scale = exp2(float(24 - e));
     if (top * scale >= 511.5) { e = min(e + 1, 31); scale = exp2(float(24 - e)); }
-    uint3 m = min(uint3(c * scale + 0.5), 511u);
+    uint3 m = min(uint3(c * scale + dither), 511u);
     return m.r | (m.g << 9) | (m.b << 18) | (uint(e) << 27);
 }
 [RootSignature(RS)]
@@ -329,7 +329,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float3 found;
     if (constant > 0.0) {
         found = float3(1.0, 0.98, 0.94) * constant * open;
-        light[p] = pack(found);
+        light[p] = pack(found, noise);
         return;
     }
     // Between the four points around, those at its own depth first; which
@@ -363,7 +363,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float top = max(dot(found, LUMA) * most, 1e-6);
     float has = dot(was, LUMA);
     was *= min(1.0, top / max(has, 1e-6));
-    light[p] = pack(max(was, found));
+    light[p] = pack(max(was, found), noise);
 }
 #endif
 "#;

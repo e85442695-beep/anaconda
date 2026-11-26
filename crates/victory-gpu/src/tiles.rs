@@ -143,9 +143,9 @@ fn trim_held_levels_for(held: u32, levels: u32, max_dim: u32, drop: u32, min_dim
     trimmed
 }
 
-pub(crate) fn trim_held_levels(held: u32, levels: u32, max_dim: u32) -> u32 {
+fn drop_config() -> (u32, u32) {
     static CFG: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
-    let &(drop, min_dim) = CFG.get_or_init(|| {
+    *CFG.get_or_init(|| {
         let drop = std::env::var("VICTORY_TILES_DROP")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
@@ -160,7 +160,16 @@ pub(crate) fn trim_held_levels(held: u32, levels: u32, max_dim: u32) -> u32 {
             tracing::warn!(drop, min_dim, "tiled top-mip drop active (VICTORY_TILES_DROP)");
         }
         (drop, min_dim)
-    });
+    })
+}
+
+pub(crate) fn wants_drop(max_dim: u32) -> bool {
+    let (drop, min_dim) = drop_config();
+    drop > 0 && max_dim >= min_dim
+}
+
+pub(crate) fn trim_held_levels(held: u32, levels: u32, max_dim: u32) -> u32 {
+    let (drop, min_dim) = drop_config();
     trim_held_levels_for(held, levels, max_dim, drop, min_dim)
 }
 

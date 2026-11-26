@@ -1591,7 +1591,8 @@ fn hosted(this: This, make: bool) -> Option<Made> {
                 && bytes >= crate::tiles::floor()
                 && (!crate::texture::committed(r.data().cast_const(), bytes as usize)
                     || crate::descriptor::host::next_start(start, start.saturating_add(bytes)).is_some()
-                    || crate::descriptor::host::first_viewed(start).is_some_and(|first| first > 0));
+                    || crate::descriptor::host::first_viewed(start).is_some_and(|first| first > 0)
+                    || crate::tiles::wants_drop(r.desc.width.max(u64::from(r.desc.height)) as u32));
             let reserved = if partly { host_texture_as(&r.desc, r.host.state, clear, true) } else { None };
             let cut = reserved
                 .as_ref()

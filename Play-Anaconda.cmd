@@ -18,11 +18,13 @@ if not exist "%runner%" (
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\Anaconda\cache"
 if not defined VICTORY_DATA_DIR set "VICTORY_DATA_DIR=%LOCALAPPDATA%\Anaconda\data-s"
 
-rem 1. Proven crash-free 4 GB VRAM cap (leaves GDDR5 room for render targets, no TDR/OOM)
+rem 1. Proven crash-free 4 GB VRAM cap + safe tiled top-mip drop
 if not defined VICTORY_VRAM_MB set "VICTORY_VRAM_MB=3050"
 if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
+if not defined VICTORY_LEVELS_MIN_KB set "VICTORY_LEVELS_MIN_KB=512"
 if not defined VICTORY_TEXTURE_BUDGET_MB set "VICTORY_TEXTURE_BUDGET_MB=1150"
-if not defined VICTORY_TILES_DROP set "VICTORY_TILES_DROP=0"
+if not defined VICTORY_TILES_DROP set "VICTORY_TILES_DROP=2"
+if not defined VICTORY_TILES_DROP_MIN set "VICTORY_TILES_DROP_MIN=512"
 if not defined VICTORY_TILES_TAIL_ALWAYS set "VICTORY_TILES_TAIL_ALWAYS=1"
 if not defined VICTORY_TEXTURE_DROP set "VICTORY_TEXTURE_DROP=0"
 if not defined VICTORY_CARD_ROOM_FOR_TARGETS_MB set "VICTORY_CARD_ROOM_FOR_TARGETS_MB=900"
@@ -36,11 +38,11 @@ if not defined VICTORY_LIBRARY_LOCK set "VICTORY_LIBRARY_LOCK=1"
 if not defined VICTORY_LIBRARY_MAP set "VICTORY_LIBRARY_MAP=0"
 if not defined VICTORY_VSYNC set "VICTORY_VSYNC=1"
 
-rem 3. No hardware Ray Tracing: 16x faster half-grid ambient GI + indoor floor
-if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1.0"
+rem 3. No hardware Ray Tracing: 16x faster dithered ambient GI + clean indoor fog cap
+if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=0.75"
 if not defined VICTORY_AMBIENT_FAST set "VICTORY_AMBIENT_FAST=1"
-if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.04"
-if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.5"
+if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.015"
+if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.45"
 
 rem 4. Texture streaming & CPU command-list pipeline
 if not defined VICTORY_THIN set "VICTORY_THIN=1"

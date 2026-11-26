@@ -27,7 +27,12 @@ V vs(uint id : SV_VertexID) {
 float4 ps(V v) : SV_Target {
     float4 s = scene.SampleLevel(smooth_, v.uv, 0);
     float4 o = over.SampleLevel(smooth_, v.uv, 0);
-    return float4(saturate(o.rgb + s.rgb * (1 - saturate(o.a))), 1);
+    float3 col = o.rgb + s.rgb * (1.0 - saturate(o.a));
+    // Subtle 1-LSB Interleaved Gradient Noise dithering breaks up 8-bit banding
+    // rings in dark interiors and around bright ceiling lights.
+    float ign = frac(52.9829189 * frac(dot(v.at.xy, float2(0.06711056, 0.00583715))));
+    col += (ign - 0.5) / 255.0;
+    return float4(saturate(col), 1);
 }
 "#;
 
