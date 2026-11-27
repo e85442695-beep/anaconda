@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Anaconda — 4 ГБ VRAM &amp; No-RT форк VIctory / cool_fox</title>
+  <meta name="description" content="Anaconda — форк VIctory / cool_fox для відеокарт із 4 ГБ VRAM без апаратного Ray Tracing. Реальний запис на GTX 1650 4 ГБ, Series S FSR + RCAS та генерація кадрів у стилі AMD FSR 3." />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Anaconda — 4 GB VRAM &amp; No-RT Edition" />
+  <meta property="og:description" content="Live GTX 1650 4 GB capture, 16 MiB best-fit tile heaps, built-in Series S FSR + RCAS and HUD-less AMD FSR 3-style Frame Generation." />
+  <meta property="og:url" content="https://e85442695-beep.github.io/anaconda/" />
+  <meta property="og:image" content="https://e85442695-beep.github.io/anaconda/media/poster.jpg" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Manrope:wght@400;500;700&family=Unbounded:wght@600;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="#top">
+        <img class="brand-mark" src="./media/anaconda-logo.jpg" alt="Anaconda" width="34" height="34" />
+        <span>Anaconda</span>
+      </a>
+
+      <nav class="nav-links" aria-label="Main navigation">
+        <a href="#demo" data-i18n="navDemo">Відео</a>
+        <a href="#telemetry" data-i18n="navTelemetry">Заміри</a>
+        <a href="#architecture" data-i18n="navArch">Архітектура</a>
+        <a href="#quickstart" data-i18n="navStart">Запуск</a>
+      </nav>
+
+      <div class="topbar-actions">
+        <div class="lang-switch" role="group" aria-label="Language">
+          <button type="button" class="lang-btn is-active" data-lang="ua" aria-pressed="true">UA</button>
+          <button type="button" class="lang-btn" data-lang="en" aria-pressed="false">EN</button>
+        </div>
+        <a class="btn btn-outline btn-sm" href="https://github.com/e85442695-beep/anaconda" target="_blank" rel="noopener noreferrer" data-i18n="navRepo">GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="wrap hero-grid">
+        <div>
+          <h1 class="hero-title">Anaconda</h1>
+          <p class="hero-sub" data-i18n="heroSub">4 ГБ VRAM. Без апаратного Ray Tracing.</p>
+          <p class="hero-lead" data-i18n="heroLead">
+            Інженерний форк VIctory / cool_fox на Rust і Direct3D 12, оптимізований для бюджетних відеокарт рівня GTX 1650 4 ГБ: жорсткий ліміт VRAM, 16 МіБ best-fit тайлові хіпи, вбудований Series S FSR + RCAS та генерація кадрів у стилі AMD FSR 3.
+          </p>
+          <div class="hero-actions">
+            <a id="hero-watch-btn" class="btn btn-primary" href="#demo" data-i18n="heroWatch">Дивитись запис GTX 1650</a>
+            <a class="btn btn-outline" href="https://github.com/e85442695-beep/anaconda" target="_blank" rel="noopener noreferrer" data-i18n="heroRepo">Відкрити репозиторій</a>
+          </div>
+          <p class="hero-notice" data-i18n="heroNotice">
+            Репозиторій не містить файлів, ресурсів чи бінарників гри. Потрібен власний дамп Xbox Series під час запуску.
+          </p>
+        </div>
+
+        <aside class="emblem-panel" aria-label="Test hardware">
+          <img class="emblem-art" src="./media/anaconda-logo.jpg" alt="Anaconda VI Emblem" width="460" height="306" />
+          <dl class="rig-ledger">
+            <div>
+              <dt data-i18n="rigGpu">Відеокарта тесту</dt>
+              <dd>GTX 1650 4 GB GDDR5</dd>
+            </div>
+            <div>
+              <dt data-i18n="rigCpu">Процесор і RAM</dt>
+              <dd>Ryzen 5 5500 · 16 GB</dd>
+            </div>
+            <div>
+              <dt data-i18n="rigRt">Ray Tracing</dt>
+              <dd data-i18n="rigRtVal">Не потрібен (No-RT)</dd>
+            </div>
+            <div>
+              <dt data-i18n="rigProfile">Консольний профіль</dt>
+              <dd>Xbox Series S · D3D12</dd>
+            </div>
+          </dl>
+        </aside>
+      </div>
+    </section>
+
+    <section id="demo" class="theater-band" aria-labelledby="demo-heading">
+      <div class="wrap">
+        <div class="theater-shell">
+          <div class="theater-accent" aria-hidden="true"></div>
+          <div class="theater-head">
+            <div class="theater-title-group">
+              <span class="live-dot" aria-hidden="true"></span>
+              <h2 id="demo-heading" class="theater-heading" data-i18n="theaterHeading">
+                Реальний запис геймплею — GTX 1650 4 ГБ (чисті FPS, без FrameGen)
+              </h2>
+            </div>
+            <span class="theater-specs" data-i18n="theaterSpecs">1080p запис · 57.5 с · 4–5 FPS (211–260 ms) · HUD F4</span>
+          </div>
+
+          <div class="video-stage">
+            <video
+              id="demo-video"
+              controls
+              playsinline
+              preload="metadata"
+              poster="./media/poster.jpg"
+            >
+              <source src="./media/anaconda-gtx1650-demo.mp4" type="video/mp4" />
+              <source src="https://github.com/e85442695-beep/anaconda/releases/download/v0.1-demo/anaconda-gtx1650-demo.mp4" type="video/mp4" />
+            </video>
+          </div>
+
+          <div class="chapter-bar">
+            <div class="chapters" role="group" aria-label="Video chapters">
+              <button type="button" class="chapter-btn is-active" data-time="0">
+                <span class="chapter-time">0:00</span>
+                <span data-i18n="ch0">Двір і човен</span>
+              </button>
+              <button type="button" class="chapter-btn" data-time="18">
+                <span class="chapter-time">0:18</span>
+                <span data-i18n="ch1">Пікап і світло</span>
+              </button>
+              <button type="button" class="chapter-btn" data-time="27">
+                <span class="chapter-time">0:27</span>
+                <span data-i18n="ch2">Вулиця на заході</span>
+              </button>
+              <button type="button" class="chapter-btn" data-time="42">
+                <span class="chapter-time">0:42</span>
+                <span data-i18n="ch3">Колесо зброї (UI)</span>
+              </button>
+              <button type="button" class="chapter-btn" data-time="52">
+                <span class="chapter-time">0:52</span>
+                <span data-i18n="ch4">Авто та тіні</span>
+              </button>
+            </div>
+
+            <div class="theater-links">
+              <a class="text-link" href="https://github.com/e85442695-beep/anaconda/releases/download/v0.1-demo/anaconda-gtx1650-demo.mp4" data-i18n="downloadMp4">Завантажити MP4 (29.3 МБ)</a>
+              <a class="text-link" href="https://github.com/e85442695-beep/anaconda/releases/tag/v0.1-demo" target="_blank" rel="noopener noreferrer" data-i18n="releaseLink">Реліз v0.1-demo</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="telemetry" class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <h2 class="section-title" data-i18n="telTitle">Реальні заміри на GTX 1650 4 ГБ</h2>
+          <p class="section-desc" data-i18n="telDesc">
+            Усі цифри взяті напряму з релізного профайлера victory_gpu::performance без прикрашань і без генерації кадрів.
+          </p>
+        </div>
+
+        <div class="telemetry-list">
+          <div class="metric-row">
+            <div>
+              <div class="metric-name" data-i18n="m1Name">Час кадру та реальні FPS</div>
+              <div class="metric-note" data-i18n="m1Note">Відкритий світ, Frame Generation вимкнено</div>
+            </div>
+            <div class="bar-stack">
+              <div class="bar-line">
+                <span class="bar-label" data-i18n="lblBefore">ДО</span>
+                <div class="bar-track"><div class="bar-fill is-before" style="width: 100%"></div></div>
+              </div>
+              <div class="bar-line">
+                <span class="bar-label" data-i18n="lblAfter">ЗАРАЗ</span>
+                <div class="bar-track"><div class="bar-fill is-after" style="width: 68%"></div></div>
+              </div>
+            </div>
+            <div class="metric-values">
+              <div class="metric-now" data-i18n="m1Now">196–250 ms (4.0–5.1 FPS)</div>
+              <div class="metric-delta" data-i18n="m1Delta">було 300–345 ms (3.1 FPS)</div>
+            </div>
+          </div>
+
+          <div class="metric-row">
+            <div>
+              <div class="metric-name" data-i18n="m2Name">Тайлові хіпи текстур у VRAM</div>
+              <div class="metric-note" data-i18n="m2Note">16 МіБ best-fit пул замість 64 МіБ first-fit</div>
+            </div>
+            <div class="bar-stack">
+              <div class="bar-line">
+                <span class="bar-label" data-i18n="lblBefore">ДО</span>
+                <div class="bar-track"><div class="bar-fill is-before" style="width: 100%"></div></div>
+              </div>
+              <div class="bar-line">
+                <span class="bar-label" data-i18n="lblAfter">ЗАРАЗ</span>
+                <div class="bar-track"><div class="bar-fill is-after" style="width: 58%"></div></div>
+              </div>
+            </div>
+            <div class="metric-values">
+              <div class="metric-now" data-i18n="m2Now">480 MiB</div>
+              <div class="metric-delta" data-i18n="m2Delta">-352 MiB проти 832 MiB</div>
+            </div>
+          </div>
+
+          <div class="metric-row">
+            <div>
+              <div class="metric-name" data-i18n="m3Name">Простій GPU (gpu_wait_ms)</div>
+              <div class="metric-note" data-i18n="m3Note">Stage-2 relay + перша фаза відкритого світу</div>
+            </div>
+            <div class="bar-stack">
+              <div class="bar-line">
+                <span class="bar-label" data-i18n="lblBefore">ДО</span>
+                <div class="bar-track"><div class="bar-fill is-before" style="width: 100%"></div></div>
+              </div>
+              <div class="bar-line">
+                <span class="bar-label" data-i18n="lblAfter">ЗАРАЗ</span>
+                <div class="bar-track"><div class="bar-fill is-after" style="width: 31%"></div></div>
+              </div>
+            </div>
+            <div class="metric-values">
+              <div class="metric-now" data-i18n="m3Now">56–70 ms</div>
+              <div class="metric-delta" data-i18n="m3Delta">в 3× нижче за 187–226 ms</div>
+            </div>
+          </div>
+
+          <div class="metric-row">
+            <div>
+              <div class="metric-name" data-i18n="m4Name">Підготовка текстур (texture_prepare)</div>
+              <div class="metric-note" data-i18n="m4Note">Ліміт міпів 256 px (staging 88 KiB замість 5.4 MiB)</div>
+            </div>
+            <div class="bar-stack">
+              <div class="bar-line">
+                <span class="bar-label" data-i18n="lblBefore">ДО</span>
+                <div class="bar-track"><div class="bar-fill is-before" style="width: 100%"></div></div>
+              </div>
+              <div class="bar-line">
+                <span class="bar-label" data-i18n="lblAfter">ЗАРАЗ</span>
+                <div class="bar-track"><div class="bar-fill is-after" style="width: 3%"></div></div>
+              </div>
+            </div>
+            <div class="metric-values">
+              <div class="metric-now" data-i18n="m4Now">0.6–1.9 ms</div>
+              <div class="metric-delta" data-i18n="m4Delta">~80× швидше за 138 ms</div>
+            </div>
+          </div>
+
+          <div class="metric-row">
+            <div>
+              <div class="metric-name" data-i18n="m5Name">Прохід Frame Generation (720p)</div>
+              <div class="metric-note" data-i18n="m5Note">4-рівневий Optical Flow + синтез на GTX 1650</div>
+            </div>
+            <div class="bar-stack">
+              <div class="bar-line">
+                <span class="bar-label" data-i18n="lblGpu">GTX 1650</span>
+                <div class="bar-track"><div class="bar-fill is-mint" style="width: 14%"></div></div>
+              </div>
+            </div>
+            <div class="metric-values">
+              <div class="metric-now" data-i18n="m5Now">1.20 ms / кадр</div>
+              <div class="metric-delta" data-i18n="m5Delta">~8.2 MiB VRAM, без HUD-гостингу</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="roadmap-callout">
+          <h3 data-i18n="roadmapTitle">Наступна ціль профілювання — 10 реальних FPS без FrameGen</h3>
+          <p data-i18n="roadmapText">
+            Релізний профайлер уже показав 4 конкретні джерела решти ~240 ms/кадр: гра досі тримає 1080p render targets (rt_mib = 1,466 MiB), що перевищує бюджет 3.0 ГБ, а також фази CPU/readback: deferred_ms (35–55 ms), card_back_ms (32–45 ms) і snap_ms (22–27 ms). Саме над цим працюємо в наступному етапі.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="architecture" class="section">
+      <div class="wrap arch-split">
+        <div class="arch-sticky">
+          <h2 class="section-title" data-i18n="archTitle">Що змінює Anaconda</h2>
+          <p data-i18n="archLead">
+            Код побудовано поверх codec-d/cool_fox (pareto-residency) і VIctory з прицілом на Turing 4 ГБ без RT-ядер.
+          </p>
+        </div>
+
+        <div class="arch-rows">
+          <article class="arch-row">
+            <div class="arch-row-head">
+              <h3 data-i18n="a1Title">Жорсткий контроль 4 ГБ VRAM та резерви під світ</h3>
+              <span class="arch-path">victory-gpu/src/resource.rs · shadow.rs</span>
+            </div>
+            <p data-i18n="a1Body">
+              VICTORY_VRAM_MB обмежує локальний бюджет DXGI, а resource::room() більше не ігнорує реальне заповнення карти при заданому ліміті текстур. Для render targets і GPU-буферів завчасно тримається вільний резерв, а дрібні буфери від 64 KiB залишаються у VRAM замість повільного PCIe Shared RAM.
+            </p>
+          </article>
+
+          <article class="arch-row">
+            <div class="arch-row-head">
+              <h3 data-i18n="a2Title">16 МіБ best-fit тайлові хіпи текстур</h3>
+              <span class="arch-path">victory-gpu/src/tiles.rs</span>
+            </div>
+            <p data-i18n="a2Body">
+              Замість 64-мегабайтних хіпів, у яких «зависало» до 376 MiB мертвої VRAM, на картах ≤ 6 ГБ автоматично створюються 16 МіБ хіпи з best-fit аллокацією, що скоротило обсяг пулу з 832 MiB до 480 MiB із щільністю пакування 96%.
+            </p>
+          </article>
+
+          <article class="arch-row">
+            <div class="arch-row-head">
+              <h3 data-i18n="a3Title">Вбудований Series S FSR + RCAS без зовнішніх DLL</h3>
+              <span class="arch-path">victory-hle/src/modules/fidelityfx.rs · external.rs</span>
+            </div>
+            <p data-i18n="a3Body">
+              Повна реалізація amd_fidelityfx_loader_xbox.dll на Rust + D3D12 compute-шейдер cs_5_1 із 5-tap clamped RCAS різкістю, захистом від NaN/Inf і підтримкою багатопотокових thin command lists.
+            </p>
+          </article>
+
+          <article class="arch-row">
+            <div class="arch-row-head">
+              <h3 data-i18n="a4Title">Генерація кадрів у стилі AMD FSR 3 (HUD-less)</h3>
+              <span class="arch-path">victory-gpu/src/framegen.rs</span>
+            </div>
+            <p data-i18n="a4Body">
+              4-рівнева піраміда двонаправленого Zero-Mean SAD оптичного потоку, детектор зміни сцени на GPU та 3-гіпотезний синтез із обробкою дизоклюзій. Працює строго по 3D-площині (Plane 0) до накладання інтерфейсу (Plane 1), тому HUD і субтитри не розмиваються.
+            </p>
+          </article>
+
+          <article class="arch-row">
+            <div class="arch-row-head">
+              <h3 data-i18n="a5Title">Програмна компенсація освітлення без Ray Tracing</h3>
+              <span class="arch-path">victory-gpu/src/ambient.rs · settings-very-low.xml</span>
+            </div>
+            <p data-i18n="a5Body">
+              Режим без апаратних RT-арен (VICTORY_RT_NO_ARENAS=1) із програмною заміною непрямого дифузного освітлення та відбиттів (CS_RayMiss), налаштований так, щоб персонажі в приміщеннях не перетворювались на чорні силуети.
+            </p>
+          </article>
+
+          <article class="arch-row">
+            <div class="arch-row-head">
+              <h3 data-i18n="a6Title">Вбудований FPS / MS / VRAM HUD у кутку екрана</h3>
+              <span class="arch-path">victory-gpu/src/fps_hud.rs</span>
+            </div>
+            <p data-i18n="a6Body">
+              Нульові витрати VRAM у релізі, миттєве перемикання клавішею F4 у грі. Відображає реальні FPS, час кадру, статус FrameGen та поточне споживання відеопам’яті прямо поверх фінального кадру.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="quickstart" class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <h2 class="section-title" data-i18n="startTitle">Збірка та запуск</h2>
+          <p class="section-desc" data-i18n="startDesc">
+            Обери готовий режим запуску нижче, підстав шлях до власного дампу Xbox Series і запускай Play-Anaconda.cmd.
+          </p>
+        </div>
+
+        <div class="quickstart-grid">
+          <div class="code-panel">
+            <div class="code-panel-bar">
+              <div class="preset-tabs" role="tablist" aria-label="Launch profiles">
+                <button type="button" class="preset-tab is-active" role="tab" aria-selected="true" data-preset="native" data-i18n="tabNative">Чисті FPS (профілювання)</button>
+                <button type="button" class="preset-tab" role="tab" aria-selected="false" data-preset="fg" data-i18n="tabFg">2× FrameGen (плавність)</button>
+                <button type="button" class="preset-tab" role="tab" aria-selected="false" data-preset="ultralow" data-i18n="tabUltraLow">Максимум запасу VRAM</button>
+              </div>
+              <button type="button" id="copy-code-btn" class="copy-btn" data-i18n="copy">Скопіювати</button>
+            </div>
+            <pre class="code-body"><code id="preset-code"></code></pre>
+          </div>
+
+          <div class="req-box">
+            <h3 data-i18n="reqTitle">Мінімальні вимоги</h3>
+            <ul class="req-list">
+              <li data-i18n-html="r1"><strong>ОС:</strong> Windows 10 / 11 x64</li>
+              <li data-i18n-html="r2"><strong>CPU:</strong> процесор із підтримкою AVX2 (перевірено на Ryzen 5 5500)</li>
+              <li data-i18n-html="r3"><strong>GPU:</strong> Direct3D 12, Shader Model 6.6 + Mesh Shaders, від 4 ГБ VRAM (апаратний RT не потрібен)</li>
+              <li data-i18n-html="r4"><strong>Інструменти збірки:</strong> Rust (з rust-toolchain.toml), MSVC Build Tools, Windows SDK</li>
+              <li data-i18n-html="r5"><strong>Дані гри:</strong> власний дамп Xbox Series (у репозиторії немає жодних файлів гри)</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="table-scroll">
+          <table class="env-table">
+            <thead>
+              <tr>
+                <th data-i18n="thVar">Змінна</th>
+                <th data-i18n="thDef">За замовчуванням</th>
+                <th data-i18n="thDesc">Призначення</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>VICTORY_DISPLAY_MODE</code></td>
+                <td><code>1280x720</code></td>
+                <td data-i18n="e1">Режим екрана, який DXGI передає грі</td>
+              </tr>
+              <tr>
+                <td><code>VICTORY_VRAM_MB</code></td>
+                <td><code>3050</code></td>
+                <td data-i18n="e2">Обмеження локального бюджету DXGI для 4 ГБ карт (MiB)</td>
+              </tr>
+              <tr>
+                <td><code>VICTORY_TILES_HEAP_MB</code></td>
+                <td><code>16</code></td>
+                <td data-i18n="e3">Розмір хіпів тайлових текстур (16 MiB best-fit для ≤ 6 ГБ GPU)</td>
+              </tr>
+              <tr>
+                <td><code>VICTORY_TEXTURE_BUDGET_MB</code></td>
+                <td><code>900</code></td>
+                <td data-i18n="e4">Верхній ліміт текстур у VRAM із дотриманням DXGI-бюджету</td>
+              </tr>
+              <tr>
+                <td><code>VICTORY_RELAY</code></td>
+                <td><code>2</code></td>
+                <td data-i18n="e5">Stage-2 асинхронний relay із перевіркою точних діапазонів</td>
+              </tr>
+              <tr>
+                <td><code>VICTORY_FSR_SCALE</code> / <code>_SHARPEN</code></td>
+                <td><code>1.35</code> / <code>0.55</code></td>
+                <td data-i18n="e6">Масштаб рендеру FSR + сила різкості RCAS</td>
+              </tr>
+              <tr>
+                <td><code>VICTORY_FRAME_GEN</code></td>
+                <td><code>0</code> (або <code>1</code> = 2×)</td>
+                <td data-i18n="e7">Генерація кадрів у стилі AMD FSR 3 (0=вимк, 1=2×, 3=3×, 4=4×)</td>
+              </tr>
+              <tr>
+                <td><code>VICTORY_FPS_HUD</code></td>
+                <td><code>right</code></td>
+                <td data-i18n="e8">Оверлей FPS / MS / VRAM на екрані (перемикання клавішею F4)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-grid">
+      <div>
+        <strong>Anaconda</strong> · GPL-3.0-or-later
+        <p class="footer-credits" data-i18n="footerCredits">
+          Anaconda базується на роботі спільноти VIctory та codec-d/cool_fox (pareto-residency), а також внесках Marvisak, fxceless, DexNom, Belobug, myokex, FQY55kai, Geckomacabre та cxy0072019-sketch. Ліцензія GPL-3.0-or-later.
+        </p>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/e85442695-beep/anaconda" target="_blank" rel="noopener noreferrer" data-i18n="footerRepo">Репозиторій</a>
+        <a href="https://github.com/e85442695-beep/anaconda/releases" target="_blank" rel="noopener noreferrer" data-i18n="footerReleases">Релізи</a>
+        <a href="https://github.com/e85442695-beep/anaconda/blob/main/docs/asset-policy.md" target="_blank" rel="noopener noreferrer" data-i18n="footerPolicy">Політика асетів</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>
