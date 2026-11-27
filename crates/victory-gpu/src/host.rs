@@ -449,6 +449,7 @@ fn sweep() {
     {
         return;
     }
+    let sweep_t0 = std::time::Instant::now();
     #[cfg(feature = "diagnostics")]
     crate::book::check();
     crate::residency::refresh();
@@ -460,6 +461,7 @@ fn sweep() {
     crate::shadow::let_go_idle();
     crate::texture::let_go_idle();
     crate::resource::let_go_idle();
+    PERF_PHASES[7].fetch_add(sweep_t0.elapsed().as_micros() as u64, Ordering::Relaxed);
 }
 
 /// The number of the newest submission begun, and of the newest of which all
@@ -644,6 +646,12 @@ static SUBMISSION_US: [std::sync::atomic::AtomicU64; 2] =
 /// frame-rate line.
 static COPY_BACK: [std::sync::atomic::AtomicU64; 2] =
     [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+
+/// Release-mode phase timers (microseconds since last 10s performance window):
+/// 0: ask_once (write-watch), 1: refresh/deferred/prelude/flush, 2: snapshots,
+/// 3: card_before, 4: heaps_sync+make_waiting, 5: card_back (GPU fetch+merge),
+/// 6: cpu_hand_back (non-carded CPU scan+merge), 7: sweep.
+static PERF_PHASES: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
 
 /// The card's clock, for the frame line of every run, in microseconds since
 /// the last one: how long the card had nothing of ours queued; how much of
@@ -4894,14 +4902,18 @@ impl Host {
                 }
                 let mut hand_back = relay_hand_back(&back);
                 stage.next("landing: copies in the card's memory");
+                let cb_t0 = std::time::Instant::now();
                 self.relay_card_back(&plans, fetch, &mut || {
                     if crate::land::on() {
                         let _looking = crate::timeline::span("landing: looking through copies, beside the fetch");
                         hand_back.look(crate::land::stat::SCAN_BESIDE);
                     }
                 });
+                PERF_PHASES[5].fetch_add(cb_t0.elapsed().as_micros() as u64, Ordering::Relaxed);
                 stage.next("landing: copies in the PC's memory");
+                let hb_t0 = std::time::Instant::now();
                 hand_back.merge();
+                PERF_PHASES[6].fetch_add(hb_t0.elapsed().as_micros() as u64, Ordering::Relaxed);
                 stage.next("landing: ranges done with");
                 let finishing = std::time::Instant::now();
                 // Only now, and flight by flight: a range another flight
@@ -5602,7 +5614,9 @@ impl Host {
             #[cfg(feature = "diagnostics")]
             SPLIT[8].fetch_add(split.so_far(), Ordering::Relaxed);
             stage.next("submit: asking the write watch");
+            let w_t0 = std::time::Instant::now();
             crate::watch::ask_once(&ranges);
+            PERF_PHASES[0].fetch_add(w_t0.elapsed().as_micros() as u64, Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
             split.part(0);
             stage.next("submit: title bytes under flights' writes");
@@ -5632,6 +5646,7 @@ impl Host {
         // What flights in the air may write.
         let air = line().written.clone();
         stage.next("submit: refreshes ahead of writes");
+        let def_t0 = std::time::Instant::now();
         if refresh_front() {
             batch.refresh_front(runs, &parts);
         } else if ahead_of_writes() {
@@ -5650,6 +5665,7 @@ impl Host {
         stage.next("submit: the last refreshes");
         batch.flush();
         crate::watch::ask_once_end();
+        PERF_PHASES[1].fetch_add(def_t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         #[cfg(feature = "diagnostics")]
         split.part(2);
         stage.next("submit: snapshots");
@@ -5657,11 +5673,12 @@ impl Host {
         // for now (`crate::shadow::wide_back`): the refreshes are done, the
         // lists have not gone to the card.
         {
-            #[cfg(feature = "diagnostics")]
-            let snapshots = std::time::Instant::now();
+            let snap_t0 = std::time::Instant::now();
             crate::shadow::take_snapshots();
+            let snap_us = snap_t0.elapsed().as_micros() as u64;
+            PERF_PHASES[2].fetch_add(snap_us, Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
-            crate::copystat::add(crate::copystat::C::SnapshotUs, snapshots.elapsed().as_micros() as u64);
+            crate::copystat::add(crate::copystat::C::SnapshotUs, snap_us);
         }
         #[cfg(feature = "diagnostics")]
         split.part(3);
@@ -5675,6 +5692,7 @@ impl Host {
             self.settle(&mut submitted, WHY_MOST);
             settled += settling.elapsed();
         }
+        let cb_t0 = std::time::Instant::now();
         // What shaders may write through views they pick: last, so that no
         // refresh of this submission leaves it alone.
         let picked = crate::picked::declare(runs);
@@ -5691,13 +5709,16 @@ impl Host {
         if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
             lists.push(Some(check));
         }
+        PERF_PHASES[3].fetch_add(cb_t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         #[cfg(feature = "diagnostics")]
         split.part(4);
         stage.next("submit: waiting for the heaps' records");
+        let heap_t0 = std::time::Instant::now();
         drop(heaps_synced);
         // The slots that waited for a texture's host copy, before the
         // lists that may read them run.
         crate::descriptor::make_waiting();
+        PERF_PHASES[4].fetch_add(heap_t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         #[cfg(feature = "diagnostics")]
         split.part(15);
         let prepared = std::time::Instant::now();
@@ -5869,10 +5890,14 @@ impl Host {
         // For copies in the card's memory the compare has run there: the
         // pieces that differ are fetched and merged.
         if let Some(card) = &card {
+            let cb_t0 = std::time::Instant::now();
             self.card_back(card, &mut submitted, &mut std::collections::HashSet::new());
+            PERF_PHASES[5].fetch_add(cb_t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
+        let hb_t0 = std::time::Instant::now();
         let back = crate::picked::with(declared, &picked.written);
         hand_back(&back);
+        PERF_PHASES[6].fetch_add(hb_t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         if let Some(card) = card {
             self.card_done(card);
         }
@@ -8743,6 +8768,8 @@ impl PerformanceWindow {
         let queue_busy_ms = (self.elapsed_ms - self.queue_idle_ms).max(0.0);
         let video_memory = HOST.get().and_then(Option::as_ref).and_then(Host::video_memory);
         let mib = |index: usize| video_memory.map(|memory| memory[index] >> 20);
+        let phase_ms = |i: usize| PERF_PHASES[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames;
+        let (card_refused, card_refused_bytes) = crate::shadow::card_refused_stats();
         tracing::info!(
             target: "victory_gpu::performance",
             seconds = format_args!("{:.2}", self.elapsed_ms / 1000.0),
@@ -8759,10 +8786,27 @@ impl PerformanceWindow {
             gpu_wait_ms = format_args!("{:.1}", self.gpu_wait_ms / frames),
             gpu_queue_busy_est_ms = format_args!("{:.1}", queue_busy_ms / frames),
             readback_ms = format_args!("{:.1}", self.readback_ms / frames),
+            ask_watch_ms = format_args!("{:.1}", phase_ms(0)),
+            deferred_ms = format_args!("{:.1}", phase_ms(1)),
+            snap_ms = format_args!("{:.1}", phase_ms(2)),
+            card_before_ms = format_args!("{:.1}", phase_ms(3)),
+            heaps_ms = format_args!("{:.1}", phase_ms(4)),
+            card_back_ms = format_args!("{:.1}", phase_ms(5)),
+            cpu_back_ms = format_args!("{:.1}", phase_ms(6)),
+            sweep_ms = format_args!("{:.1}", phase_ms(7)),
             local_used_mib = ?mib(1),
             local_budget_mib = ?mib(0),
             shared_used_mib = ?mib(3),
             shared_budget_mib = ?mib(2),
+            rt_mib = crate::resource::render_target_bytes() >> 20,
+            tex_mib = crate::resource::filled_texture_bytes() >> 20,
+            tiled_mib = crate::tiles::given_total() >> 20,
+            tiled_heaps_mib = crate::tiles::heaps_total() >> 20,
+            tiled_freed = crate::tiles::heaps_returned(),
+            card_buf_mib = crate::shadow::card_vram_bytes() >> 20,
+            card_refused,
+            card_refused_mib = card_refused_bytes >> 20,
+            staging_mib = crate::texture::live_staging_bytes() >> 20,
             "render performance window"
         );
         *self = Self::default();

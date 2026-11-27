@@ -450,21 +450,33 @@ extern "C" fn ffxQuery(context: *mut *mut c_void, desc: *mut Header) -> u32 {
             QUERY_UPSCALE_RATIO => {
                 // SAFETY: UpscaleRatio layout.
                 let q = unsafe { &mut *desc.cast::<UpscaleRatio>() };
+                let r = quality_ratio(q.quality_mode);
                 if !q.ratio.is_null() {
-                    unsafe { *q.ratio = quality_ratio(q.quality_mode) };
+                    unsafe { *q.ratio = r };
                 }
+                once!(warn, mode = q.quality_mode, ratio = r, "FidelityFX builtin: QUERY_UPSCALE_RATIO");
                 OK
             }
             QUERY_RENDER_RESOLUTION => {
                 // SAFETY: RenderResolution layout.
                 let q = unsafe { &mut *desc.cast::<RenderResolution>() };
                 let r = quality_ratio(q.quality_mode);
+                let rw = ((q.display_width as f32 / r).round() as u32).max(1);
+                let rh = ((q.display_height as f32 / r).round() as u32).max(1);
                 if !q.render_width.is_null() {
-                    unsafe { *q.render_width = ((q.display_width as f32 / r).round() as u32).max(1) };
+                    unsafe { *q.render_width = rw };
                 }
                 if !q.render_height.is_null() {
-                    unsafe { *q.render_height = ((q.display_height as f32 / r).round() as u32).max(1) };
+                    unsafe { *q.render_height = rh };
                 }
+                once!(
+                    warn,
+                    mode = q.quality_mode,
+                    display = ?[q.display_width, q.display_height],
+                    render = ?[rw, rh],
+                    ratio = r,
+                    "FidelityFX builtin: QUERY_RENDER_RESOLUTION"
+                );
                 OK
             }
             QUERY_JITTER_PHASE_COUNT => {

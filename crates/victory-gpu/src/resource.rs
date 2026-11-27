@@ -1719,37 +1719,51 @@ pub(crate) fn host_made<'a>(
 
 /// Unconditional host-texture floor for a given local VRAM budget (`None` when
 /// the adapter does not report one): up to 2 GiB, capped at a quarter of the
-/// reported budget so 4–6 GiB cards do not bypass the budget check early.
+/// reported budget (and an eighth on <= 4 GiB cards so textures do not crowd
+/// out world render targets and card-resident shader buffers before frame 1).
 #[cfg(any(windows, test))]
 fn texture_floor_bytes(vram_budget: Option<u64>) -> u64 {
     const MAX_FLOOR: u64 = 2 << 30;
+    const FOUR_GIB: u64 = 4 << 30;
     match vram_budget {
+        Some(budget) if budget <= FOUR_GIB => (budget / 8).min(384 << 20),
         Some(budget) => MAX_FLOOR.min(budget / 4),
         None => MAX_FLOOR,
     }
 }
 
-/// Whether more host copies of textures the title fills may be made for
-/// shaders that pick textures by index (`draw.rs` `heap_textures`): always
-/// up to [`texture_floor_bytes`] bytes of them, beyond that while the card's
-/// memory in use by this process is under nine tenths of the budget the system
-/// gives it ([`room_percent`] says another share; `VICTORY_TEXTURE_BUDGET_MB`
-/// sets a limit on those copies' bytes instead). Past the budget the system moves the card's memory into the PC's,
-/// which ended runs 20 and 24.
+/// Live bytes of host-written render targets / depth-stencil textures (excluding
+/// title-filled textures).
 #[cfg(windows)]
-pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
+pub(crate) fn render_target_bytes() -> u64 {
     use std::sync::atomic::Ordering::Relaxed;
+    HOST_TEXTURES[1].load(Relaxed).saturating_sub(KINDS[1].load(Relaxed))
+}
+
+/// Live bytes of non-tiled title-filled textures on the card.
+#[cfg(windows)]
+pub(crate) fn filled_texture_bytes() -> u64 {
+    KINDS[1].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Pure decision core for [`room`]: `limit` (`VICTORY_TEXTURE_BUDGET_MB`) is
+/// an upper cap on title-filled texture bytes, never a bypass of the DXGI
+/// local VRAM budget or the room reserved for render targets and card buffers.
+#[cfg(any(windows, test))]
+fn room_allows(
+    filled: u64,
+    limit: Option<u64>,
+    memory: Option<[u64; 4]>,
+    pool_texture_room: u64,
+    card_kept: u64,
+    targets_kept: u64,
+    room_pct: u64,
+) -> bool {
     const WITHOUT_BUDGET: u64 = 4 << 30;
-    static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    let limit = *LIMIT.get_or_init(|| {
-        let mb = std::env::var("VICTORY_TEXTURE_BUDGET_MB").ok()?;
-        mb.trim().parse::<u64>().ok().map(|mb| mb << 20)
-    });
-    // (With the tiles of the copies made level by level, whose own bytes
-    // count as none: `crate::tiles`.)
-    let filled = KINDS[1].load(Relaxed) + crate::tiles::given_total();
-    if let Some(limit) = limit {
-        return filled < limit;
+    if let Some(limit) = limit
+        && filled >= limit
+    {
+        return false;
     }
     let floor = texture_floor_bytes(memory.map(|[budget, ..]| budget));
     if filled < floor {
@@ -1761,33 +1775,66 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
         // world makes in its first frame ([`targets_room_kept`]) counts as
         // used.
         Some([budget, used, ..]) => {
-            used.saturating_sub(crate::pool::texture_room()) + crate::shadow::card_room_kept() + targets_room_kept()
-                < budget / 100 * room_percent()
+            used.saturating_sub(pool_texture_room) + card_kept + targets_kept
+                < budget / 100 * room_pct
         }
         None => filled < WITHOUT_BUDGET,
     }
 }
 
-/// Small emergency cushion (+192 MiB) when `!room` and `VICTORY_TILES_TAIL_ALWAYS=1`
-/// so tiny/tail-only placed textures still upload instead of rendering pitch black.
+/// Whether more host copies of textures the title fills may be made for
+/// shaders that pick textures by index (`draw.rs` `heap_textures`): always
+/// up to [`texture_floor_bytes`] bytes of them, beyond that while the card's
+/// memory in use by this process is under nine tenths of the budget the system
+/// gives it ([`room_percent`] says another share; `VICTORY_TEXTURE_BUDGET_MB`
+/// acts as an additional upper cap on those copies' bytes without bypassing
+/// the DXGI VRAM budget or reserved room for render targets and card buffers).
+#[cfg(windows)]
+pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let limit = *LIMIT.get_or_init(|| {
+        let mb = std::env::var("VICTORY_TEXTURE_BUDGET_MB").ok()?;
+        mb.trim().parse::<u64>().ok().map(|mb| mb << 20)
+    });
+    // (With the tiles of the copies made level by level, whose own bytes
+    // count as none: `crate::tiles`.)
+    let filled = KINDS[1].load(Relaxed) + crate::tiles::given_total();
+    room_allows(
+        filled,
+        limit,
+        memory,
+        crate::pool::texture_room(),
+        crate::shadow::card_room_kept(),
+        targets_room_kept(),
+        room_percent(),
+    )
+}
+
+/// Small emergency cushion (+128 MiB) when `!room` and `VICTORY_TILES_TAIL_ALWAYS=1`
+/// so tiny/tail-only placed textures still upload instead of rendering pitch black,
+/// while still staying under the physical DXGI local VRAM budget so WDDM never
+/// starts paging render targets over PCIe.
 #[cfg(windows)]
 pub(crate) fn room_emergency(memory: Option<[u64; 4]>) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     if !crate::tiles::tail_always() {
         return false;
     }
-    const CUSHION: u64 = 192 << 20;
+    const CUSHION: u64 = 128 << 20;
     let filled = KINDS[1].load(Relaxed) + crate::tiles::given_total();
     static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     let limit = *LIMIT.get_or_init(|| {
         let mb = std::env::var("VICTORY_TEXTURE_BUDGET_MB").ok()?;
         mb.trim().parse::<u64>().ok().map(|mb| mb << 20)
     });
-    if let Some(limit) = limit {
-        return filled < limit.saturating_add(CUSHION);
+    if let Some(limit) = limit
+        && filled >= limit.saturating_add(CUSHION)
+    {
+        return false;
     }
     match memory {
-        Some([budget, used, ..]) => used < budget.saturating_add(CUSHION),
+        Some([budget, used, ..]) => used < budget / 100 * 96,
         None => true,
     }
 }
@@ -1809,6 +1856,20 @@ pub(crate) fn room_emergency(memory: Option<[u64; 4]>) -> bool {
 /// 238), and the queue was refused from the first world frame on. With
 /// their room kept, the queue stops that much earlier while the world
 /// loads and gets it back as the targets are made.
+/// Default VRAM reservation for render targets not yet created before world
+/// frame 1 when `VICTORY_CARD_ROOM_FOR_TARGETS_MB` is unset: 3 GiB on 8+ GiB
+/// cards, or 40% of the DXGI local budget on `<= 6 GiB` cards so a 4 GB card
+/// never reserves more than its own budget.
+#[cfg(any(windows, test))]
+fn targets_room_default_bytes(vram_budget: Option<u64>) -> u64 {
+    const SIX_GIB: u64 = 6 << 30;
+    const DEFAULT_HIGH: u64 = 3072 << 20;
+    match vram_budget {
+        Some(budget) if budget <= SIX_GIB => budget / 100 * 40,
+        _ => DEFAULT_HIGH,
+    }
+}
+
 #[cfg(windows)]
 pub(crate) fn targets_room_kept() -> u64 {
     use std::sync::atomic::Ordering::Relaxed;
@@ -1817,7 +1878,15 @@ pub(crate) fn targets_room_kept() -> u64 {
         std::env::var("VICTORY_CARD_ROOM_FOR_TARGETS_MB")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
-            .map_or(3072 << 20, |mb| mb.min(8192) << 20)
+            .map_or_else(
+                || {
+                    let budget = crate::host::host()
+                        .and_then(|h| h.video_memory())
+                        .map(|[budget, ..]| budget);
+                    targets_room_default_bytes(budget)
+                },
+                |mb| mb.min(8192) << 20,
+            )
     });
     // Every host texture's bytes less those of the copies the title fills.
     let targets = HOST_TEXTURES[1].load(Relaxed).saturating_sub(KINDS[1].load(Relaxed));
@@ -4631,13 +4700,32 @@ float4 lit() : SV_Target { return 1.0; }
     #[test]
     fn texture_floor_scales_with_vram_budget() {
         const GIB: u64 = 1 << 30;
+        const MIB: u64 = 1 << 20;
         assert_eq!(texture_floor_bytes(None), 2 * GIB);
-        assert_eq!(texture_floor_bytes(Some(4 * GIB)), GIB);
+        assert_eq!(texture_floor_bytes(Some(3 * GIB)), 384 * MIB);
+        assert_eq!(texture_floor_bytes(Some(4 * GIB)), 384 * MIB);
         assert_eq!(texture_floor_bytes(Some(6 * GIB)), 6 * GIB / 4);
         assert_eq!(texture_floor_bytes(Some(8 * GIB)), 2 * GIB);
         assert_eq!(texture_floor_bytes(Some(12 * GIB)), 2 * GIB);
         assert_eq!(texture_floor_bytes(Some(24 * GIB)), 2 * GIB);
         assert_eq!(texture_floor_bytes(Some(32 * GIB)), 2 * GIB);
+
+        // Low-VRAM default target reservation must stay well below the local budget.
+        assert_eq!(targets_room_default_bytes(Some(3000 * MIB)), 1200 * MIB);
+        assert_eq!(targets_room_default_bytes(Some(8 * GIB)), 3072 * MIB);
+
+        // Regression test: setting VICTORY_TEXTURE_BUDGET_MB (e.g. 1400 MiB) must
+        // NOT bypass the real DXGI local VRAM budget + render-target/buffer reserve.
+        let gtx1650_over = Some([3007 * MIB, 2850 * MIB, 7465 * MIB, 0]);
+        assert!(
+            !room_allows(900 * MIB, Some(1400 * MIB), gtx1650_over, 0, 0, 0, 90),
+            "must refuse when local_used already exceeds 90% of DXGI budget"
+        );
+        // Below texture cap and with headroom -> allowed.
+        let gtx1650_ok = Some([3007 * MIB, 1200 * MIB, 7465 * MIB, 0]);
+        assert!(room_allows(600 * MIB, Some(900 * MIB), gtx1650_ok, 0, 400 * MIB, 800 * MIB, 90));
+        // Over explicit texture cap even when VRAM has headroom -> refused.
+        assert!(!room_allows(900 * MIB, Some(900 * MIB), gtx1650_ok, 0, 0, 0, 90));
     }
 
     /// A placed texture viewed from a later level has a host copy of that

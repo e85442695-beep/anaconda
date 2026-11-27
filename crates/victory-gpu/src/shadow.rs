@@ -290,6 +290,19 @@ fn card_room_kept_on() -> bool {
 /// buffers, so no room is kept for them any more.
 static CARD_REFUSED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
+/// Live VRAM held by card-resident shader buffer mirrors and their "before" twins.
+pub(crate) fn card_vram_bytes() -> u64 {
+    CARD_BYTES[0].load(Ordering::Relaxed) + CARD_BYTES[1].load(Ordering::Relaxed)
+}
+
+/// `(count, bytes)` of title buffers refused from card VRAM due to lack of room.
+pub(crate) fn card_refused_stats() -> (u64, u64) {
+    (
+        CARD_REFUSED[0].load(Ordering::Relaxed),
+        CARD_REFUSED[1].load(Ordering::Relaxed),
+    )
+}
+
 /// The bytes of the card's memory the texture queue leaves free for card
 /// copies of title buffers not made yet ([`card_room_kept_on`]): 0 with
 /// the switch off or without card copies.
@@ -405,8 +418,8 @@ fn card_room_for(size: u64) -> Option<ID3D12Resource> {
         // 32nd.
         let n = CARD_REFUSED[0].fetch_add(1, Ordering::Relaxed) + 1;
         let bytes = CARD_REFUSED[1].fetch_add(size, Ordering::Relaxed) + size;
-        if n <= 64 || n.is_multiple_of(32) {
-            tracing::info!(
+        if n <= 4 || n.is_multiple_of(32) {
+            tracing::warn!(
                 "no card copy for a title buffer of {} KiB: the card has {} MB in use of a budget of {} MB and a copy is made up to \
                  {} MB; the copies made hold {} MB of at most {} MB; {} buffers turned down so far ({} MB), frame {}",
                 size >> 10,

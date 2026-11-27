@@ -237,10 +237,42 @@ pub(crate) fn given_total() -> u64 {
     STATS[2].load(Ordering::Relaxed)
 }
 
+/// The bytes of tile pool heaps currently allocated on the card.
+pub(crate) fn heaps_total() -> u64 {
+    STATS[3].load(Ordering::Relaxed)
+}
+
+/// Number of tile pool heaps reclaimed and returned to the card so far.
+pub(crate) fn heaps_returned() -> u64 {
+    STATS[8].load(Ordering::Relaxed)
+}
+
+/// Default tile-heap size in 64 KiB tiles: 256 tiles (16 MiB) on <= 6 GiB VRAM
+/// cards so sparsely populated heaps drain and return VRAM promptly instead of
+/// pinning 64 MiB per stray mip tail; 1024 tiles (64 MiB) on larger GPUs.
+fn default_heap_tiles() -> u32 {
+    static TILES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *TILES.get_or_init(|| {
+        if let Some(mb) = std::env::var("VICTORY_TILES_HEAP_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|&mb| mb > 0)
+        {
+            return (mb.clamp(4, 64) * 16).min(HEAP_TILES);
+        }
+        const SIX_GIB: u64 = 6 << 30;
+        let low_vram = host()
+            .and_then(crate::host::Host::video_memory)
+            .is_some_and(|[budget, ..]| budget <= SIX_GIB);
+        if low_vram { 256 } else { HEAP_TILES }
+    })
+}
+
 /// One heap of the pool and its free runs of tiles (first tile, tiles), in
 /// order, no two touching.
 struct Heap {
     heap: ID3D12Heap,
+    capacity: u32,
     free: Vec<(u32, u32)>,
 }
 
@@ -260,19 +292,29 @@ static POOL: Mutex<Vec<Option<Heap>>> = Mutex::new(Vec::new());
 
 /// `count` tiles of one heap, in as many runs as it takes, the lowest free
 /// tiles first (single free tiles are used up before a long run is cut):
-/// the heap, its place in the pool and the runs (first tile, tiles). A new
-/// heap is made when no heap has that many free.
+/// the heap, its place in the pool and the runs (first tile, tiles). Uses
+/// best-fit (fullest heap that still fits `count`) so nearly-empty heaps
+/// drain to zero and return their VRAM back to the card.
 fn take(device: &ID3D12Device, count: u32) -> Option<(ID3D12Heap, usize, Vec<(u32, u32)>)> {
     if count == 0 || count > HEAP_TILES {
         return None;
     }
     let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
-    let found = pool.iter().position(|h| h.as_ref().is_some_and(|h| h.free_tiles() >= count));
+    let found = pool
+        .iter()
+        .enumerate()
+        .filter_map(|(i, h)| {
+            let free = h.as_ref()?.free_tiles();
+            (free >= count).then_some((i, free))
+        })
+        .min_by_key(|&(_, free)| free)
+        .map(|(i, _)| i);
     let index = match found {
         Some(index) => index,
         None => {
+            let capacity = default_heap_tiles().max(count.next_power_of_two()).min(HEAP_TILES);
             let desc = D3D12_HEAP_DESC {
-                SizeInBytes: u64::from(HEAP_TILES) * TILE,
+                SizeInBytes: u64::from(capacity) * TILE,
                 Properties: D3D12_HEAP_PROPERTIES {
                     Type: D3D12_HEAP_TYPE_DEFAULT,
                     ..Default::default()
@@ -288,9 +330,10 @@ fn take(device: &ID3D12Device, count: u32) -> Option<(ID3D12Heap, usize, Vec<(u3
             }
             let fresh = Heap {
                 heap: made?,
-                free: vec![(0, HEAP_TILES)],
+                capacity,
+                free: vec![(0, capacity)],
             };
-            STATS[3].fetch_add(u64::from(HEAP_TILES) * TILE, Ordering::Relaxed);
+            STATS[3].fetch_add(u64::from(capacity) * TILE, Ordering::Relaxed);
             match pool.iter().position(Option::is_none) {
                 Some(index) => {
                     pool[index] = Some(fresh);
@@ -340,10 +383,11 @@ fn give_back(index: usize, runs: &[(u32, u32)]) {
         }
     }
     h.free = joined;
-    let all_free = h.free_tiles() == HEAP_TILES;
+    let cap = h.capacity;
+    let all_free = h.free_tiles() == cap;
     if all_free && pool.iter().flatten().count() > 1 {
         pool[index] = None;
-        STATS[3].fetch_sub(u64::from(HEAP_TILES) * TILE, Ordering::Relaxed);
+        STATS[3].fetch_sub(u64::from(cap) * TILE, Ordering::Relaxed);
         STATS[8].fetch_add(1, Ordering::Relaxed);
     }
 }
