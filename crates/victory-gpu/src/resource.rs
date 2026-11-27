@@ -1301,17 +1301,21 @@ fn drop_floor(desc: &ResourceDesc) -> u32 {
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|&v| v > 0)
             .map_or(0, |v| v.clamp(128, 8192));
-        if levels > 0 || max_dim_cap > 0 {
+        if levels > 0 || (max_dim_cap > 0 && held_only()) {
             tracing::warn!(
                 levels,
                 least,
-                max_dim_cap,
+                max_dim_cap = if held_only() { max_dim_cap } else { 0 },
                 "placed texture mip-drop/cap active (VICTORY_TEXTURE_DROP / VICTORY_TEXTURE_MAX_DIM)"
             );
         }
         (levels, least, max_dim_cap)
     });
-    drop_floor_for(desc.width, desc.height, levels, least, max_dim_cap)
+    // When `VICTORY_LEVELS_ON_DEMAND=1` (`!held_only()`), `VICTORY_TEXTURE_MAX_DIM`
+    // is applied safely by `crate::tiles` (full mip chain, zero subresource shift);
+    // only an explicit `VICTORY_TEXTURE_DROP` shifts `base` on non-tiled copies.
+    let cap = if held_only() { max_dim_cap } else { 0 };
+    drop_floor_for(desc.width, desc.height, levels, least, cap)
 }
 
 /// The level a host copy begins at for views that start at `first`: one the
@@ -2564,8 +2568,10 @@ fn host_texture_as(
     };
     // A texture the title fills, whose every subresource is uploaded before
     // anything reads it: cut from a block (what the piece held before shows
-    // in no texel).
-    if fills(desc)
+    // in no texel). Never hijack `reserved = true` requests, which must be
+    // `CreateReservedResource` for `crate::tiles` levels-on-demand.
+    if !reserved
+        && fills(desc)
         && d.sample_count <= 1
         && clear_value.is_none()
         && texture_layout(desc).is_some_and(|t| !t.planes[0].layout.desc.swizzle.xor())
@@ -4676,5 +4682,48 @@ float4 lit() : SV_Target { return 1.0; }
         assert_eq!(drop_floor_for(128, 128, 0, 512, 256), 0);
         assert_eq!(drop_floor_for(1024, 1024, 3, 512, 256), 3);
         assert_eq!(drop_floor_for(1024, 1024, 0, 512, 0), 0);
+    }
+
+    /// Regression test: `host_texture_as(..., reserved = true)` must create a
+    /// true D3D12 reserved resource for `crate::tiles`, never hijacked by
+    /// `crate::pool::texture` (which returns a placed resource whose
+    /// `GetResourceTiling` returns 0 tiles and silently disables levels-on-demand).
+    #[cfg(windows)]
+    #[test]
+    fn reserved_texture_is_not_hijacked_by_pool() {
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        for (width, height, mips, format) in [
+            (512u64, 512u32, 10u16, 71u32),  // BC1_UNORM (~174 KiB)
+            (512, 512, 10, 98),              // BC7_UNORM (~349 KiB)
+            (1024, 512, 11, 77),             // BC3_UNORM (~699 KiB)
+            (2048, 2048, 12, 98),            // BC7_UNORM (~5.5 MiB)
+        ] {
+            let desc = ResourceDesc {
+                dimension: 3, // TEXTURE2D
+                alignment: 0,
+                width,
+                height,
+                depth_or_array_size: 1,
+                mip_levels: mips,
+                format,
+                sample_count: 1,
+                sample_quality: 0,
+                layout: 0x105,
+                flags: 0,
+            };
+            let tex = host_texture_as(&desc, 0, std::ptr::null(), true)
+                .expect("reserved texture created");
+            // SAFETY: live resource.
+            let d = unsafe { tex.GetDesc() };
+            assert_eq!(
+                d.Layout,
+                windows::Win32::Graphics::Direct3D12::D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE,
+                "{width}x{height} f{format} must be reserved, not pooled placed"
+            );
+            let tiled = crate::tiles::Tiled::make(&host.device, &tex, u32::from(mips));
+            assert!(tiled.is_some(), "Tiled::make must accept reserved {width}x{height} f{format}");
+        }
     }
 }

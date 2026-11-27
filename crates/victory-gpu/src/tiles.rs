@@ -1539,6 +1539,85 @@ void look() {
         assert_eq!(tiled.claim(small), small);
     }
 
+    fn capped_256px_shapes_and_aliasing_barrier(rig: &mut Rig) {
+        rig.step = "step 8, 256px cap across rectangular & small tiled formats with aliasing barrier";
+        let cases = [
+            (DXGI_FORMAT_BC1_UNORM, 512u32, 512u32, 10u16, 1u32),
+            (DXGI_FORMAT_BC7_UNORM, 512, 512, 10, 1),
+            (DXGI_FORMAT_BC3_UNORM, 1024, 512, 11, 2),
+            (DXGI_FORMAT_BC7_UNORM, 2048, 2048, 12, 3),
+            (DXGI_FORMAT_R8G8B8A8_UNORM, 512, 512, 10, 1),
+        ];
+        for (format, w, h, levels, expected_first) in cases {
+            let desc = D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+                Width: u64::from(w),
+                Height: h,
+                DepthOrArraySize: 1,
+                MipLevels: levels,
+                Format: format,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Layout: D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE,
+                ..Default::default()
+            };
+            let (texture, tiled) = rig.reserved(&desc);
+            let all = (1u32 << levels) - 1;
+            let trimmed = trim_held_levels_for(all, u32::from(levels), w.max(h), 0, 512, 256);
+            let (changed, waiting) = tiled.uploaded_on(&rig.queue, &rig.device, &texture, trimmed, true);
+            rig.check("capped UpdateTileMappings");
+            assert!(changed && !waiting, "{w}x{h} f{} waiting={waiting}", format.0);
+            assert_eq!(tiled.first_shown(), Some(expected_first), "{w}x{h} f{}", format.0);
+            assert!(
+                tiled.given_bytes() < tiled.full,
+                "{w}x{h} f{} should save tiles: given {} vs full {}",
+                format.0,
+                tiled.given_bytes(),
+                tiled.full
+            );
+            let layout = rig.footprints(&desc);
+            let upload = rig.filled(&layout, |lvl| (lvl as u8).wrapping_add(0x21));
+            // Verify aliasing barrier + full-chain CopyTextureRegion (including unmapped top mips).
+            rig.run(|list| {
+                let aliasing = D3D12_RESOURCE_BARRIER {
+                    Type: D3D12_RESOURCE_BARRIER_TYPE_ALIASING,
+                    Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                    Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                        Aliasing: std::mem::ManuallyDrop::new(D3D12_RESOURCE_ALIASING_BARRIER {
+                            pResourceBefore: std::mem::ManuallyDrop::new(None),
+                            // SAFETY: borrowed handle for the duration of ResourceBarrier.
+                            pResourceAfter: unsafe { std::mem::transmute_copy(&texture) },
+                        }),
+                    },
+                };
+                // SAFETY: open list with live resources.
+                unsafe {
+                    list.ResourceBarrier(&[aliasing]);
+                    for (i, fp) in layout.footprints.iter().enumerate() {
+                        let to = D3D12_TEXTURE_COPY_LOCATION {
+                            pResource: std::mem::transmute_copy(&texture),
+                            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: i as u32 },
+                        };
+                        let from = D3D12_TEXTURE_COPY_LOCATION {
+                            pResource: std::mem::transmute_copy(&upload),
+                            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: *fp },
+                        };
+                        list.CopyTextureRegion(&to, 0, 0, 0, &from, None);
+                    }
+                }
+            });
+            rig.check("capped aliasing + CopyTextureRegion");
+            eprintln!(
+                "capped {w}x{h} f{}: first_shown={:?}, given={} KiB / full={} KiB",
+                format.0,
+                tiled.first_shown(),
+                tiled.given_bytes() >> 10,
+                tiled.full >> 10
+            );
+        }
+    }
+
     /// On the software adapter unless `VICTORY_TILES_TEST_CARD=1`.
     #[test]
     #[ignore = "on the card: run it by name with --ignored --nocapture"]
@@ -1555,6 +1634,7 @@ void look() {
         a_level_on_several_ranges(&mut rig);
         a_full_card_keeps_new_levels_waiting(&mut rig);
         a_claim_given_up_is_made_again(&mut rig);
+        capped_256px_shapes_and_aliasing_barrier(&mut rig);
         if the_view_starts_at_the_first_level_with_tiles(&mut rig).is_none() {
             eprintln!("the view test's shader or objects could not be made; that part was skipped");
         }

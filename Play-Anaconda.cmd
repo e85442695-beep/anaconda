@@ -72,7 +72,7 @@ rem 5. Built-in Series S FSR + NaN-safe RCAS GPU compute upscaler (540p -> 720p/
 if not defined VICTORY_FSR_SCALE set "VICTORY_FSR_SCALE=2.0"
 if not defined VICTORY_FSR_SHARPEN set "VICTORY_FSR_SHARPEN=0.55"
 
-if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn,victory_gpu::performance=info,victory_gpu::ambient=info"
+if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn,victory_gpu::performance=info,victory_gpu::ambient=info,victory_gpu::tiles=info"
 
 "%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-s --execute
 exit /b %errorlevel%

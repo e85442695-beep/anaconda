@@ -1243,6 +1243,15 @@ fn read_back(
     let bytes = pitch * (rows - 1) + row;
     let data = buffer_range(dst.resource, dst.footprint.offset, bytes).ok_or("a destination outside its buffer")?;
     let texture = crate::resource::host_resource(src.resource).ok_or("no host texture")?;
+    let src_base = crate::resource::made_copy(src.resource).map_or(0, |c| c.base);
+    let mut from = src;
+    if src_base > 0 {
+        let sub = src.footprint.offset as u32;
+        if sub < src_base {
+            return Err("source mip dropped from host copy");
+        }
+        from.footprint.offset = u64::from(sub - src_base);
+    }
     let buffer = host.read_back_buffer(size).ok_or("no read-back buffer")?;
     // As a texture source of any copy: what shaders wrote to a depth twin
     // and what the title wrote itself first, then the state.
@@ -1251,7 +1260,6 @@ fn read_back(
         crate::texture::upload(list, src.resource, texture);
     }
     ensure_state(list, src.resource, COPY_SOURCE);
-    let mut from = src;
     from.resource = texture.as_raw().cast_const().cast();
     let mut to = dst;
     to.resource = buffer.as_raw().cast_const().cast();
@@ -1315,6 +1323,12 @@ extern "system" fn resolve(
         if unlike(dst, src) {
             return;
         }
+        let dst_base = crate::resource::made_copy(dst).map_or(0, |c| c.base);
+        let src_base = crate::resource::made_copy(src).map_or(0, |c| c.base);
+        if dst_sub < dst_base || src_sub < src_base {
+            return;
+        }
+        let (dst_sub, src_sub) = (dst_sub - dst_base, src_sub - src_base);
         // Depth textures shaders also write: what they wrote, first.
         list.twin_use(dst, false, true);
         list.twin_use(src, false, false);

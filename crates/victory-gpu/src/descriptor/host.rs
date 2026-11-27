@@ -4479,18 +4479,28 @@ fn make_twinned(
 /// on (`crate::resource::held_only`). What it shows of larger ones, if any,
 /// is left out.
 fn from_base(desc: &mut D3D12_SHADER_RESOURCE_VIEW_DESC, base: u32, host_mips: u32) {
-    if desc.ViewDimension != D3D12_SRV_DIMENSION_TEXTURE2D {
-        return;
+    let shift = |most: &mut u32, mips: &mut u32, min_lod: &mut f32| {
+        let lost = base.saturating_sub(*most);
+        *most = most.saturating_sub(base).min(host_mips - 1);
+        if *mips != u32::MAX && *mips != 0 {
+            let max_left = (host_mips - *most).max(1);
+            *mips = mips.saturating_sub(lost).clamp(1, max_left);
+        }
+        *min_lod = (*min_lod - base as f32).max(0.0);
+    };
+    match desc.ViewDimension {
+        D3D12_SRV_DIMENSION_TEXTURE2D => {
+            // SAFETY: the member its dimension says.
+            let t = unsafe { &mut desc.Anonymous.Texture2D };
+            shift(&mut t.MostDetailedMip, &mut t.MipLevels, &mut t.ResourceMinLODClamp);
+        }
+        D3D12_SRV_DIMENSION_TEXTURE2DARRAY => {
+            // SAFETY: the member its dimension says.
+            let t = unsafe { &mut desc.Anonymous.Texture2DArray };
+            shift(&mut t.MostDetailedMip, &mut t.MipLevels, &mut t.ResourceMinLODClamp);
+        }
+        _ => {}
     }
-    // SAFETY: the member its dimension says.
-    let t = unsafe { &mut desc.Anonymous.Texture2D };
-    let lost = base.saturating_sub(t.MostDetailedMip);
-    t.MostDetailedMip = t.MostDetailedMip.saturating_sub(base).min(host_mips - 1);
-    if t.MipLevels != u32::MAX && t.MipLevels != 0 {
-        let max_left = (host_mips - t.MostDetailedMip).max(1);
-        t.MipLevels = t.MipLevels.saturating_sub(lost).clamp(1, max_left);
-    }
-    t.ResourceMinLODClamp = (t.ResourceMinLODClamp - base as f32).max(0.0);
 }
 
 /// Writes of a slot with another view of the placed texture it showed,
@@ -4970,6 +4980,13 @@ mod tests {
         assert_eq!(view(5, u32::MAX, 5.5), (2, u32::MAX, 2.5));
         // (Two levels the copy has not.)
         assert_eq!(view(1, 4, 0.0), (0, 2, 0.0));
+        // 2D array views of single-slice 2D copies must also shift and clamp.
+        let mut arr = srv_desc(&[98, 5, 5768, 0, 1, 10, 0, 1, 0, 0]);
+        arr.Anonymous.Texture2DArray.ResourceMinLODClamp = 4.5;
+        from_base(&mut arr, 3, 7);
+        // SAFETY: ViewDimension is TEXTURE2DARRAY (5).
+        let ta = unsafe { arr.Anonymous.Texture2DArray };
+        assert_eq!((ta.MostDetailedMip, ta.MipLevels, ta.ResourceMinLODClamp), (0, 7, 1.5));
     }
 
     /// 2D textures and arrays have a neutral stand-in, others a null view.
