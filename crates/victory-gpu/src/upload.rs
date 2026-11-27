@@ -100,7 +100,7 @@ impl Upload {
             None => {
                 let blocks = n.max(ARENA / BLOCK);
                 let at = reserve(blocks * BLOCK)?;
-                crate::shadow::register_upload(at, at as u64, (blocks * BLOCK) as u64);
+                crate::shadow::register(at, at as u64, (blocks * BLOCK) as u64);
                 tracing::info!(at = format_args!("{at:#x}"), bytes = blocks * BLOCK, "memory for lists' uploads, where shaders reach it by address");
                 arenas.push(Arena { at, taken: vec![false; blocks] });
                 (arenas.len() - 1, 0)

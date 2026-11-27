@@ -50,9 +50,11 @@ pub(crate) fn room(memory: Option<[u64; 4]>) {
     let low_vram = memory.is_some_and(|[budget, ..]| budget <= FOUR_GIB);
     let mut limit = spares(memory, crate::host::keep_freed() && !pressure);
     if low_vram {
-        let tight = pressure
-            || memory.is_some_and(|[budget, used, ..]| u128::from(used) * 100 >= u128::from(budget) * 80);
-        limit = if tight { 0 } else { limit.min(1) };
+        // Only drop to 0 spare VRAM heaps when local VRAM itself is >= 85% full;
+        // keep 1 ripe 16 MiB spare heap below 85% so VICTORY_RIPE_BLOCKS=1 stays active.
+        let vram_tight = memory
+            .is_some_and(|[budget, used, ..]| u128::from(used) * 100 >= u128::from(budget) * 85);
+        limit = if vram_tight { 0 } else { limit.min(1) };
     }
     let staging_limit = if crate::residency::critical_commit() {
         0

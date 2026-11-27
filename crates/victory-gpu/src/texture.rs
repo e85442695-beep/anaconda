@@ -1096,6 +1096,10 @@ pub(crate) fn card_writes(list: &HostList, resource: This, texture: &ID3D12Resou
                 host.device
                     .GetCopyableFootprints(&d, level, 1, 0, Some(&mut footprint), None, None, Some(&mut bytes));
             }
+            if bytes == 0 || bytes == u64::MAX {
+                unzeroed |= tiled.with_level(level);
+                continue;
+            }
             let Some((buffer, data)) = list.upload(host, bytes) else {
                 // (With the levels that share its tiles, if it is one of
                 // the small ones.)

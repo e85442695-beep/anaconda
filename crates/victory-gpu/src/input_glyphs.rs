@@ -560,6 +560,15 @@ impl InputGlyphsHud {
 
         let dst_x = MARGIN_X;
         let dst_y = height - bh - MARGIN_Y;
+        // Defensive guard against swapchain dimension/format mismatch.
+        // SAFETY: live D3D12 back-buffer resource.
+        let bd = unsafe { back.GetDesc() };
+        if bd.Format != format
+            || u64::from(dst_x + bw) > bd.Width
+            || dst_y + bh > bd.Height
+        {
+            return;
+        }
         let from = D3D12_TEXTURE_COPY_LOCATION {
             pResource: unsafe { std::mem::transmute_copy(&src_buf) },
             Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
@@ -726,5 +735,60 @@ mod tests {
         let px = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>().add(offset), 4) };
         assert_eq!(px, &[242, 41, 139, 255], "expected magenta glyph-strip accent at bottom-left");
         unsafe { rb.Unmap(0, None) };
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn input_glyphs_all_swap_formats_and_resolutions_close_cleanly() {
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        let _ = host.log_messages();
+        set_mode(GlyphMode::ForceKbm);
+        let mut glyphs = InputGlyphsHud::new();
+        let heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            ..Default::default()
+        };
+        for fmt in [
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_FORMAT_R10G10B10A2_UNORM,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+        ] {
+            for (w, h) in [(640u32, 360u32), (1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+                let desc = D3D12_RESOURCE_DESC {
+                    Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+                    Width: u64::from(w),
+                    Height: h,
+                    DepthOrArraySize: 1,
+                    MipLevels: 1,
+                    Format: fmt,
+                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    ..Default::default()
+                };
+                let mut tex: Option<ID3D12Resource> = None;
+                unsafe {
+                    host.device
+                        .CreateCommittedResource(
+                            &heap,
+                            D3D12_HEAP_FLAG_NONE,
+                            &desc,
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                            None,
+                            &mut tex,
+                        )
+                        .unwrap();
+                }
+                let tex = tex.unwrap();
+                let list = host.new_list().unwrap();
+                glyphs.draw(host, &list.list, &tex, (w, h), fmt, |r| list.keep(r));
+                let closed = unsafe { list.list.Close() };
+                let msg = host.log_messages();
+                assert!(closed.is_ok(), "{w}x{h} fmt={} Close failed: {closed:?} msg={msg:?}", fmt.0);
+                assert!(msg.is_none(), "{w}x{h} fmt={} debug error: {msg:?}", fmt.0);
+            }
+        }
+        set_mode(GlyphMode::Auto);
     }
 }

@@ -338,10 +338,6 @@ enum BufferKind {
     Normal,
     /// Title buffer created with `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`.
     Uav,
-    /// Host-internal CPU upload arena (`crate::upload`): CPU-written every frame,
-    /// read-only by shaders — keep in shared memory so it never steals card VRAM
-    /// or adds `card_before` PCIe copy traffic.
-    UploadArena,
 }
 
 /// The bytes of the card's memory the texture queue leaves free for card
@@ -401,9 +397,6 @@ pub(crate) fn card_hash_bytes(size: u64) -> u64 {
 /// [`card_limits`] and below 1 GiB (the compare counts in 32 bits), and the
 /// host has what it takes (`Host::card_ready`).
 fn card_for(size: u64, kind: BufferKind) -> Option<ID3D12Resource> {
-    if kind == BufferKind::UploadArena {
-        return None;
-    }
     let there = card_room_for(size, kind);
     if there.is_some() || !card_all() || size >= 1 << 30 {
         return there;
@@ -439,7 +432,7 @@ fn card_all() -> bool {
 /// non-UAV buffers to the first half of the cap so read-only menu/static
 /// buffers never crowd out shader-written world buffers into CPU snapshotting.
 fn card_room_for(size: u64, kind: BufferKind) -> Option<ID3D12Resource> {
-    if !cards() || kind == BufferKind::UploadArena {
+    if !cards() {
         return None;
     }
     let (least, most) = card_limits();
@@ -4912,7 +4905,6 @@ fn buffers_read() -> std::sync::RwLockReadGuard<'static, BTreeMap<(u64, usize), 
 }
 
 /// A title buffer exists at `start` (`len` bytes).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn register(resource: usize, start: u64, len: u64) {
     register_kind(resource, start, len, BufferKind::Normal);
 }
@@ -4926,13 +4918,6 @@ pub(crate) fn register_with(resource: usize, start: u64, len: u64, allow_uav: bo
         len,
         if allow_uav { BufferKind::Uav } else { BufferKind::Normal },
     );
-}
-
-/// A host-internal CPU upload arena (`crate::upload`): CPU-written each frame
-/// and read-only by shaders, so kept in shared memory instead of stealing
-/// card VRAM from shader-written buffers.
-pub(crate) fn register_upload(resource: usize, start: u64, len: u64) {
-    register_kind(resource, start, len, BufferKind::UploadArena);
 }
 
 fn register_kind(resource: usize, start: u64, len: u64, kind: BufferKind) {

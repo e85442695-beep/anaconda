@@ -826,7 +826,7 @@ pub(crate) fn fail(what: std::fmt::Arguments) -> ! {
         match host.log_messages() {
             Some(first) => text.push_str(&format!("; debug layer: {first}")),
             None if host.messages.is_none() => text.push_str(
-                "; a diagnostics build with VICTORY_D3D12_DEBUG=1 names the command",
+                "; set VICTORY_D3D12_DEBUG=1 to name the invalid command",
             ),
             None => {}
         }
@@ -865,8 +865,9 @@ pub(crate) fn host() -> Option<&'static Host> {
 fn create() -> windows::core::Result<Host> {
     // SAFETY: plain D3D12 object creation with valid descriptions.
     unsafe {
-        // The debug layer only in builds with diagnostics.
-        let debug = cfg!(feature = "diagnostics") && crate::switch::on("VICTORY_D3D12_DEBUG");
+        // Enable D3D12 debug layer whenever VICTORY_D3D12_DEBUG=1 is set (zero
+        // overhead when unset, works in both release and diagnostics builds).
+        let debug = crate::switch::on("VICTORY_D3D12_DEBUG");
         if debug {
             let mut layer: Option<ID3D12Debug> = None;
             match D3D12GetDebugInterface(&mut layer) {
@@ -6299,7 +6300,9 @@ impl HostList {
         times
     }
 
+    #[track_caller]
     pub(crate) fn close(&self) {
+        let caller = std::panic::Location::caller();
         let _closing = crate::timeline::span("closing a host list");
         self.twins_to_depth();
         self.textures_back();
@@ -6321,8 +6324,14 @@ impl HostList {
         }
         // SAFETY: our list.
         if let Err(e) = unsafe { self.list.Close() } {
+            let states = self.states.lock().unwrap_or_else(|e| e.into_inner()).len();
+            let twins = self.twins.lock().unwrap_or_else(|e| e.into_inner()).len();
+            let copies = self.deferred().copies.len();
             fail(format_args!(
-                "a host command list did not close ({e}): a command recorded into it was invalid"
+                "a host command list did not close ({e}) at {}:{} (frame={}, states={states}, copies={copies}, twins={twins}): a command recorded into it was invalid",
+                caller.file(),
+                caller.line(),
+                crate::frame::current()
             ));
         }
     }
@@ -8810,7 +8819,6 @@ impl PerformanceWindow {
             shared_used_mib = ?mib(3),
             shared_budget_mib = ?mib(2),
             rt_mib = crate::resource::render_target_bytes() >> 20,
-            rt_freed_mib = crate::resource::rt_freed_bytes() >> 20,
             tex_mib = crate::resource::filled_texture_bytes() >> 20,
             pool_mib = crate::pool::texture_blocks_mib(),
             tiled_mib = crate::tiles::given_total() >> 20,

@@ -1605,7 +1605,7 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             && r.desc.depth_or_array_size == 1
             && r.desc.mip_levels > 1
             && r.desc.sample_count <= 1;
-        if shape_fits && r.host.placed.load(Relaxed) && crate::tiles::wanted() {
+        if shape_fits && r.host.placed.load(Relaxed) && crate::tiles::wanted() && alias_of(this).is_none() {
             let bytes = footprint(&r.desc).map_or(0, |f| f.size);
             let start = r.data() as u64;
             // What the upload can read: a console layout, no XOR mode
@@ -1809,15 +1809,6 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
         targets_room_kept(),
         room_percent(),
     )
-}
-
-/// Live bytes of dead unmapped render targets retired so far.
-#[cfg(windows)]
-static RT_FREED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-#[cfg(windows)]
-pub(crate) fn rt_freed_bytes() -> u64 {
-    RT_FREED_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Small emergency cushion (+128 MiB) when `!room` and `VICTORY_TILES_TAIL_ALWAYS=1`
@@ -2293,60 +2284,6 @@ pub(crate) fn let_go_idle() {
                 first = Some(at);
             }
             crate::host::retire(host);
-        }
-    }
-    // Reclaim 100%-dead placed render targets whose title backing memory has
-    // already been unmapped by the title (at most once per second, under
-    // low-VRAM or >= 85% budget pressure). Never touches mapped or live RTs.
-    static LAST_RT_SWEEP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let rt_pressure = memory.is_some_and(|[budget, used, ..]| {
-        budget <= (6 << 30) || u128::from(used) * 100 >= u128::from(budget) * 85
-    });
-    let now_ms = crate::host::now_ms();
-    if rt_pressure && now_ms.saturating_sub(LAST_RT_SWEEP.load(Relaxed)) >= 1000 {
-        LAST_RT_SWEEP.store(now_ms, Relaxed);
-        let mut rt_freed = 0u64;
-        for &at in all.iter() {
-            // SAFETY: `all` holds the textures table lock.
-            let r = unsafe { &*(at as *const Resource) };
-            if fills(&r.desc) || !r.host.placed.load(Relaxed) {
-                continue;
-            }
-            let used = r.host.used.load(Relaxed);
-            if used == 0 || !crate::host::long_ago(used, 5_000, 12) {
-                continue;
-            }
-            if crate::texture::committed(r.data().cast_const(), 1) {
-                continue;
-            }
-            let gone = {
-                let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
-                let dead = made.as_ref().is_some_and(|(host, twin)| {
-                    crate::host::long_ago(r.host.used.load(Relaxed), 5_000, 12)
-                        && std::sync::Arc::strong_count(host) == 1
-                        && crate::host::references(&host.texture) == 1
-                        && twin
-                            .as_ref()
-                            .is_none_or(|t| crate::host::references(&t.colour.texture) == 1)
-                });
-                if dead {
-                    crate::texture::unstage(at as This);
-                    made.take()
-                } else {
-                    None
-                }
-            };
-            if let Some((host, twin)) = gone {
-                let freed = host.bytes + twin.as_ref().map_or(0, |t| t.colour.bytes);
-                rt_freed += freed;
-                crate::host::retire(host);
-                if let Some(twin) = twin {
-                    crate::host::retire(twin);
-                }
-            }
-        }
-        if rt_freed > 0 {
-            RT_FREED_BYTES.fetch_add(rt_freed, Relaxed);
         }
     }
     SWEPT_US[0].fetch_add(1, Relaxed);
@@ -4882,6 +4819,96 @@ float4 lit() : SV_Target { return 1.0; }
             );
             let tiled = crate::tiles::Tiled::make(&host.device, &tex, u32::from(mips));
             assert!(tiled.is_some(), "Tiled::make must accept reserved {width}x{height} f{format}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn small_64kb_reserved_textures_copy_cleanly_under_debug_layer() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        let _ = host.log_messages();
+        for (width, height, mips, format) in [
+            (256u64, 256u32, 9u16, 98u32),   // BC7_UNORM ~85 KiB
+            (256, 256, 9, 77),               // BC3_UNORM ~85 KiB
+            (512, 128, 10, 71),              // BC1_UNORM ~85 KiB (0 standard mips)
+            (1024, 64, 11, 98),              // BC7_UNORM ~85 KiB (wide strip)
+            (128, 128, 8, 28),               // R8G8B8A8_UNORM ~85 KiB
+            (128, 128, 8, 67),               // R9G9B9E5_SHAREDEXP ~85 KiB
+            (256, 128, 9, 28),               // R8G8B8A8_UNORM ~170 KiB
+            (192, 192, 8, 98),               // non-pow2 BC7_UNORM
+            (320, 180, 9, 28),               // non-pow2 R8G8B8A8_UNORM
+            (256, 256, 9, 97),               // BC7_TYPELESS
+            (128, 128, 8, 27),               // R8G8B8A8_TYPELESS
+        ] {
+            let desc = ResourceDesc {
+                dimension: 3,
+                alignment: 0,
+                width,
+                height,
+                depth_or_array_size: 1,
+                mip_levels: mips,
+                format,
+                sample_count: 1,
+                sample_quality: 0,
+                layout: 0x105,
+                flags: 0,
+            };
+            let Some(tex) = host_texture_as(&desc, 0x400, std::ptr::null(), true) else {
+                eprintln!("skipped CreateReservedResource {width}x{height} f{format}");
+                continue;
+            };
+            let Some(tiled) = crate::tiles::Tiled::make(&host.device, &tex, u32::from(mips)) else {
+                eprintln!("Tiled::make returned None for {width}x{height} f{format}");
+                continue;
+            };
+            let _ = tiled;
+            // SAFETY: live resource.
+            let d = unsafe { tex.GetDesc() };
+            let mut fps = vec![D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); usize::from(mips)];
+            let mut total = 0u64;
+            unsafe {
+                host.device.GetCopyableFootprints(
+                    &d,
+                    0,
+                    u32::from(mips),
+                    0,
+                    Some(fps.as_mut_ptr()),
+                    None,
+                    None,
+                    Some(&mut total),
+                );
+            }
+            if total == 0 || total == u64::MAX {
+                eprintln!("GetCopyableFootprints failed for {width}x{height} f{format}: total={total}");
+                continue;
+            }
+            let Some((up, _)) = host.upload_buffer(total) else {
+                continue;
+            };
+            let list = host.new_list().unwrap();
+            unsafe {
+                for (i, fp) in fps.iter().enumerate() {
+                    let to = D3D12_TEXTURE_COPY_LOCATION {
+                        pResource: std::mem::transmute_copy(&tex),
+                        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: i as u32 },
+                    };
+                    let from = D3D12_TEXTURE_COPY_LOCATION {
+                        pResource: std::mem::transmute_copy(&up),
+                        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: *fp },
+                    };
+                    list.list.CopyTextureRegion(&to, 0, 0, 0, &from, None);
+                }
+            }
+            let closed = unsafe { list.list.Close() };
+            let msg = host.log_messages();
+            eprintln!("{width}x{height} f{format}: close={closed:?} debug={msg:?}");
+            assert!(closed.is_ok(), "{width}x{height} f{format} Close() failed: {closed:?} debug={msg:?}");
+            assert!(msg.is_none(), "{width}x{height} f{format} debug layer error: {msg:?}");
         }
     }
 }
