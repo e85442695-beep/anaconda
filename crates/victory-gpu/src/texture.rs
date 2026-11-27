@@ -1199,7 +1199,14 @@ impl Staging {
             }
         }
         let max_dim = self.layout.desc.width.max(self.layout.desc.height);
-        crate::tiles::trim_held_levels(held, mips.len() as u32, max_dim)
+        let trimmed = crate::tiles::trim_held_levels(held, mips.len() as u32, max_dim);
+        // Never ask `tiles::uploaded` to map levels below `self.first` that
+        // `record_upload` does not stage/copy (prevents uninitialized tiles).
+        if self.first > 0 && self.first < 32 {
+            trimmed & !((1u32 << self.first) - 1)
+        } else {
+            trimmed
+        }
     }
 
     /// Forgets what the staging buffer was last filled from: the next
@@ -1634,7 +1641,15 @@ pub(crate) fn unchanged(resource: This, first: u32) -> bool {
         return false;
     };
     let layout = &layout.planes[0].layout;
-    if from > crate::resource::read_from(layout, first).max(copy.base) {
+    let tile_floor = if copy.tiled.is_some() {
+        crate::tiles::min_kept_level(
+            layout.mips.len() as u32,
+            layout.desc.width.max(layout.desc.height),
+        )
+    } else {
+        0
+    };
+    if from > crate::resource::read_from(layout, first.max(tile_floor)).max(copy.base) {
         return false;
     }
     let size = layout.bytes_from(from) as usize;
@@ -1839,10 +1854,19 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
     // Asked before the table is locked: the sweep lets go of a staging
     // buffer with its texture's host side locked, in that order.
     let on_demand = crate::resource::host_tiled(resource).is_some();
+    // SAFETY: a live resource.
+    let d = unsafe { texture.GetDesc() };
+    let level0 = copy.base;
+    let mips = level0 + u32::from(d.MipLevels);
+    let tile_floor = if on_demand {
+        crate::tiles::min_kept_level(mips, d.Width.max(u64::from(d.Height)) as u32)
+    } else {
+        0
+    };
     let mut map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
     let map = map.get_or_insert_with(HashMap::new);
     if let Some(s) = map.get(&(resource as usize))
-        && s.first <= first.max(copy.base)
+        && s.first <= first.max(copy.base).max(tile_floor)
         && s.serial == copy.serial
     {
         return Some(s.clone());
@@ -1861,11 +1885,9 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
         return None;
     }
     let host = host()?;
-    // SAFETY: a live resource.
-    let d = unsafe { texture.GetDesc() };
-    let level0 = copy.base;
-    let mips = level0 + u32::from(d.MipLevels);
-    let first = crate::resource::read_from(&layout, first).max(level0).min(mips - 1);
+    let first = crate::resource::read_from(&layout, first.max(tile_floor))
+        .max(level0)
+        .min(mips - 1);
     let read = layout.bytes_from(first) as usize;
     let count = if d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
         mips - first

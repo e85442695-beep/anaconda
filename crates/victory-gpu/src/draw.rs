@@ -3318,12 +3318,14 @@ impl State {
                 (Some(depth), [seen.Width as u32, seen.Height])
             }
             Role::Miss => {
-                // Full-size 32-bit depth matching 2x the half-res reflection buffer.
+                // Full-size 32-bit depth at least as large as the reflection buffer
+                // (1x on Series S 1280x720, 2x on half-res reflection targets).
                 let fits = |(d, _): &(D3D12_RESOURCE_DESC, D3D12_GPU_DESCRIPTOR_HANDLE)| {
                     d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D
                         && matches!(d.Format.0, 19 | 20 | 39 | 40 | 41)
-                        && d.Width.abs_diff(of.Width * 2) <= 1
-                        && u64::from(d.Height).abs_diff(u64::from(of.Height) * 2) <= 1
+                        && d.Width >= of.Width
+                        && d.Height >= of.Height
+                        && d.Width <= of.Width * 4
                 };
                 let found = entry(ResourceType::Srv, MISS_DEPTH).filter(fits).or_else(|| {
                     t.used

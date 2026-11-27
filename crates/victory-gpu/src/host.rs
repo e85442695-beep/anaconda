@@ -6720,14 +6720,14 @@ impl HostList {
         let recorded = unsafe {
             allocator.Reset().and_then(|()| {
                 list.Reset(allocator, None)?;
-                if !to_copy.is_empty() {
-                    list.ResourceBarrier(&to_copy);
+                for chunk in to_copy.chunks(256) {
+                    list.ResourceBarrier(chunk);
                 }
                 for (depth, twin, colour) in &syncs {
                     record_twin_copy(list, &depth.texture, twin, *colour);
                 }
-                if !barriers.is_empty() {
-                    list.ResourceBarrier(&barriers);
+                for chunk in barriers.chunks(256) {
+                    list.ResourceBarrier(chunk);
                 }
                 list.Close()
             })

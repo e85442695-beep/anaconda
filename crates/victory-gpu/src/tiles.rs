@@ -206,6 +206,23 @@ pub(crate) fn trim_held_levels(held: u32, levels: u32, max_dim: u32) -> u32 {
     trim_held_levels_for(held, levels, max_dim, drop, min_dim, max_dim_cap)
 }
 
+/// Lowest mip level that [`trim_held_levels`] can ever keep for a tiled 2D
+/// texture of `levels` mips and `max_dim` largest dimension. Levels below this
+/// are never mapped and do not need staging buffer memory or PCIe uploads.
+pub(crate) fn min_kept_level_for(levels: u32, max_dim: u32, drop: u32, min_dim: u32, max_dim_cap: u32) -> u32 {
+    if levels <= 1 {
+        return 0;
+    }
+    let all = if levels >= 32 { u32::MAX } else { (1u32 << levels) - 1 };
+    let trimmed = trim_held_levels_for(all, levels, max_dim, drop, min_dim, max_dim_cap);
+    trimmed.trailing_zeros().min(levels - 1)
+}
+
+pub(crate) fn min_kept_level(levels: u32, max_dim: u32) -> u32 {
+    let (drop, min_dim, max_dim_cap) = drop_config();
+    min_kept_level_for(levels, max_dim, drop, min_dim, max_dim_cap)
+}
+
 /// When `VICTORY_TILES_TAIL_ALWAYS=1`, allow mapping the tiny packed mip tail
 /// (<= 2 tiles = 128 KiB) even when VRAM is tight so character/world textures
 /// never render solid black.
@@ -1576,7 +1593,39 @@ void look() {
             );
             let layout = rig.footprints(&desc);
             let upload = rig.filled(&layout, |lvl| (lvl as u8).wrapping_add(0x21));
-            // Verify aliasing barrier + full-chain CopyTextureRegion (including unmapped top mips).
+            // Verify partial-mip staging (`first = min_kept_level`, skipping dropped
+            // top mips) + aliasing barrier + CopyTextureRegion on subresources `first..levels`.
+            let first_kept = min_kept_level_for(u32::from(levels), w.max(h), 0, 512, 256);
+            assert_eq!(first_kept, expected_first);
+            let partial_count = u32::from(levels) - first_kept;
+            let mut partial_fps = vec![D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); partial_count as usize];
+            let mut partial_total = 0u64;
+            // SAFETY: outputs for `partial_count` subresources starting at `first_kept`.
+            unsafe {
+                rig.device.GetCopyableFootprints(
+                    &desc,
+                    first_kept,
+                    partial_count,
+                    0,
+                    Some(partial_fps.as_mut_ptr()),
+                    None,
+                    None,
+                    Some(&mut partial_total),
+                );
+            }
+            assert!(
+                partial_total < layout.total,
+                "{w}x{h} f{} partial staging {} should be smaller than full {}",
+                format.0,
+                partial_total,
+                layout.total
+            );
+            let partial_upload = rig.buffer(
+                D3D12_HEAP_TYPE_UPLOAD,
+                D3D12_RESOURCE_FLAG_NONE,
+                D3D12_RESOURCE_STATE_GENERIC_READ,
+                partial_total,
+            );
             rig.run(|list| {
                 let aliasing = D3D12_RESOURCE_BARRIER {
                     Type: D3D12_RESOURCE_BARRIER_TYPE_ALIASING,
@@ -1592,14 +1641,14 @@ void look() {
                 // SAFETY: open list with live resources.
                 unsafe {
                     list.ResourceBarrier(&[aliasing]);
-                    for (i, fp) in layout.footprints.iter().enumerate() {
+                    for (i, fp) in partial_fps.iter().enumerate() {
                         let to = D3D12_TEXTURE_COPY_LOCATION {
                             pResource: std::mem::transmute_copy(&texture),
                             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-                            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: i as u32 },
+                            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: first_kept + i as u32 },
                         };
                         let from = D3D12_TEXTURE_COPY_LOCATION {
-                            pResource: std::mem::transmute_copy(&upload),
+                            pResource: std::mem::transmute_copy(&partial_upload),
                             Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
                             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: *fp },
                         };
@@ -1607,13 +1656,16 @@ void look() {
                     }
                 }
             });
-            rig.check("capped aliasing + CopyTextureRegion");
+            let _ = upload;
+            rig.check("capped partial-mip aliasing + CopyTextureRegion");
             eprintln!(
-                "capped {w}x{h} f{}: first_shown={:?}, given={} KiB / full={} KiB",
+                "capped {w}x{h} f{}: first_shown={:?}, given={} KiB / full={} KiB, staging={} KiB / {} KiB",
                 format.0,
                 tiled.first_shown(),
                 tiled.given_bytes() >> 10,
-                tiled.full >> 10
+                tiled.full >> 10,
+                partial_total >> 10,
+                layout.total >> 10
             );
         }
     }
@@ -1653,6 +1705,40 @@ void look() {
             s[3] >> 20,
             s[8]
         );
+    }
+
+    #[test]
+    fn reserved_zero_tiles_transition_barrier_on_host() {
+        let Some(host) = host() else { return };
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Width: 512,
+            Height: 512,
+            DepthOrArraySize: 1,
+            MipLevels: 10,
+            Format: DXGI_FORMAT_BC7_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE,
+            ..Default::default()
+        };
+        let mut tex: Option<ID3D12Resource> = None;
+        // SAFETY: plain reserved resource with ZERO tiles mapped.
+        unsafe {
+            host.device
+                .CreateReservedResource(&desc, D3D12_RESOURCE_STATE_COMMON, None, &mut tex)
+                .unwrap();
+        }
+        let tex = tex.unwrap();
+        let list = host.new_list().unwrap();
+        let b1 = crate::host::transition(&tex, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        let b2 = crate::host::transition(&tex, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        // SAFETY: open list with live reserved resource.
+        unsafe {
+            list.list.ResourceBarrier(&[b1]);
+            list.list.ResourceBarrier(&[b2]);
+        }
+        list.close();
+        host.execute_sync_internal(&list);
     }
 
     #[test]

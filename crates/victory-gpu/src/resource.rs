@@ -2200,11 +2200,12 @@ pub(crate) fn let_go_idle() {
             }
         };
         if let Some((host, _)) = gone {
+            let freed = host.tiled.as_ref().map_or(host.bytes, |t| t.given_bytes());
             r.host.gone.store(true, Relaxed);
             KINDS[2].fetch_add(1, Relaxed);
-            KINDS[3].fetch_add(host.bytes, Relaxed);
+            KINDS[3].fetch_add(freed, Relaxed);
             went += 1;
-            bytes += host.bytes;
+            bytes += freed;
             if first.is_none() {
                 first = Some(at);
             }
