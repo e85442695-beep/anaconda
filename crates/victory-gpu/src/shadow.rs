@@ -290,6 +290,12 @@ fn card_room_kept_on() -> bool {
 /// buffers, so no room is kept for them any more.
 static CARD_REFUSED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
+/// Title buffers turned down specifically because `CARD_BYTES[0]` reached the
+/// `VICTORY_CARD_BUFFERS_MB` cap (count, bytes), plus per-window byte totals
+/// for release performance telemetry (`snap_bytes`, `cpu_cmp_bytes`, `card_fetch_bytes`).
+static CARD_CAP_REFUSED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+static PERF_BACK: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
 /// Live VRAM held by card-resident shader buffer mirrors and their "before" twins.
 pub(crate) fn card_vram_bytes() -> u64 {
     CARD_BYTES[0].load(Ordering::Relaxed) + CARD_BYTES[1].load(Ordering::Relaxed)
@@ -301,6 +307,41 @@ pub(crate) fn card_refused_stats() -> (u64, u64) {
         CARD_REFUSED[0].load(Ordering::Relaxed),
         CARD_REFUSED[1].load(Ordering::Relaxed),
     )
+}
+
+/// `(count, bytes)` of title buffers refused from card VRAM due to `VICTORY_CARD_BUFFERS_MB`.
+pub(crate) fn card_cap_refused_stats() -> (u64, u64) {
+    (
+        CARD_CAP_REFUSED[0].load(Ordering::Relaxed),
+        CARD_CAP_REFUSED[1].load(Ordering::Relaxed),
+    )
+}
+
+pub(crate) fn note_card_fetch(bytes: u64) {
+    PERF_BACK[2].fetch_add(bytes, Ordering::Relaxed);
+}
+
+/// Swaps and returns `(snap_bytes, cpu_cmp_bytes, card_fetch_bytes)` accumulated
+/// since the last release `PerformanceWindow` log.
+pub(crate) fn take_perf_back_bytes() -> [u64; 3] {
+    [
+        PERF_BACK[0].swap(0, Ordering::Relaxed),
+        PERF_BACK[1].swap(0, Ordering::Relaxed),
+        PERF_BACK[2].swap(0, Ordering::Relaxed),
+    ]
+}
+
+/// Classification of a registered title buffer for card-VRAM prioritization.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BufferKind {
+    /// Standard title buffer without explicit UAV flag.
+    Normal,
+    /// Title buffer created with `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`.
+    Uav,
+    /// Host-internal CPU upload arena (`crate::upload`): CPU-written every frame,
+    /// read-only by shaders — keep in shared memory so it never steals card VRAM
+    /// or adds `card_before` PCIe copy traffic.
+    UploadArena,
 }
 
 /// The bytes of the card's memory the texture queue leaves free for card
@@ -359,8 +400,11 @@ pub(crate) fn card_hash_bytes(size: u64) -> u64 {
 /// copy, if the copy is to be there: [`cards`] is on, the size is within
 /// [`card_limits`] and below 1 GiB (the compare counts in 32 bits), and the
 /// host has what it takes (`Host::card_ready`).
-fn card_for(size: u64) -> Option<ID3D12Resource> {
-    let there = card_room_for(size);
+fn card_for(size: u64, kind: BufferKind) -> Option<ID3D12Resource> {
+    if kind == BufferKind::UploadArena {
+        return None;
+    }
+    let there = card_room_for(size, kind);
     if there.is_some() || !card_all() || size >= 1 << 30 {
         return there;
     }
@@ -389,14 +433,25 @@ fn card_all() -> bool {
 }
 
 /// [`card_for`] in the card's own memory.
-fn card_room_for(size: u64) -> Option<ID3D12Resource> {
-    if !cards() {
+///
+/// Prioritizes UAV-flagged buffers and large (`>= 1 MiB`) buffers up to the
+/// full `VICTORY_CARD_BUFFERS_MB` cap, while limiting small (`< 1 MiB`)
+/// non-UAV buffers to the first half of the cap so read-only menu/static
+/// buffers never crowd out shader-written world buffers into CPU snapshotting.
+fn card_room_for(size: u64, kind: BufferKind) -> Option<ID3D12Resource> {
+    if !cards() || kind == BufferKind::UploadArena {
         return None;
     }
     let (least, most) = card_limits();
     if size < least || size >= 1 << 30 {
         return None;
     }
+    const ONE_MIB: u64 = 1 << 20;
+    let effective_most = if kind == BufferKind::Uav || size >= ONE_MIB {
+        most
+    } else {
+        most / 2
+    };
     let host = host()?;
     if !host.card_ready() {
         return None;
@@ -435,8 +490,24 @@ fn card_room_for(size: u64) -> Option<ID3D12Resource> {
         }
         return None;
     }
-    if CARD_BYTES[0].fetch_add(size, Ordering::Relaxed) + size > most {
+    if CARD_BYTES[0].fetch_add(size, Ordering::Relaxed) + size > effective_most {
         CARD_BYTES[0].fetch_sub(size, Ordering::Relaxed);
+        if kind == BufferKind::Uav || size >= ONE_MIB {
+            let n = CARD_CAP_REFUSED[0].fetch_add(1, Ordering::Relaxed) + 1;
+            let bytes = CARD_CAP_REFUSED[1].fetch_add(size, Ordering::Relaxed) + size;
+            if n <= 4 || n.is_multiple_of(32) {
+                tracing::warn!(
+                    "card buffer cap reached for {} KiB buffer (uav={}): {} MB / {} MB; {} cap-refused ({} MB), frame {}",
+                    size >> 10,
+                    kind == BufferKind::Uav,
+                    CARD_BYTES[0].load(Ordering::Relaxed) >> 20,
+                    most >> 20,
+                    n,
+                    bytes >> 20,
+                    crate::frame::current()
+                );
+            }
+        }
         return None;
     }
     let buffer = host.uav_buffer(size);
@@ -3096,6 +3167,7 @@ impl Shadow {
         pending.push(range);
         let taken: usize = parts.iter().map(|&(from, to)| to.saturating_sub(from)).sum();
         BACK_CLASS[usize::from(!self.window)].fetch_add(taken as u64, Ordering::Relaxed);
+        PERF_BACK[0].fetch_add(taken as u64, Ordering::Relaxed);
         let total = self.len as usize;
         let mut before = self.before.lock().unwrap_or_else(|e| e.into_inner());
         let snapshot = before.get_or_insert_with(|| pooled(total));
@@ -3242,6 +3314,7 @@ impl Shadow {
         crate::copystat::add(crate::copystat::C::BackCompared, (to - from) as u64);
         let (bytes, ranges) = if self.window { (2, 5) } else { (3, 6) };
         BACK_CLASS[bytes].fetch_add((to - from) as u64, Ordering::Relaxed);
+        PERF_BACK[1].fetch_add((to - from) as u64, Ordering::Relaxed);
         BACK_CLASS[ranges].fetch_add(1, Ordering::Relaxed);
         if !self.window && self.len >= 1 << 20 {
             BACK_CLASS[4].fetch_add((to - from) as u64, Ordering::Relaxed);
@@ -4764,6 +4837,7 @@ mod land_tests {
 
 struct Entry {
     end: u64,
+    kind: BufferKind,
     shadow: Option<Arc<Shadow>>,
 }
 
@@ -4838,11 +4912,35 @@ fn buffers_read() -> std::sync::RwLockReadGuard<'static, BTreeMap<(u64, usize), 
 }
 
 /// A title buffer exists at `start` (`len` bytes).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn register(resource: usize, start: u64, len: u64) {
+    register_kind(resource, start, len, BufferKind::Normal);
+}
+
+/// A title buffer exists at `start` (`len` bytes), with `allow_uav` marking
+/// whether the title created it with `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`.
+pub(crate) fn register_with(resource: usize, start: u64, len: u64, allow_uav: bool) {
+    register_kind(
+        resource,
+        start,
+        len,
+        if allow_uav { BufferKind::Uav } else { BufferKind::Normal },
+    );
+}
+
+/// A host-internal CPU upload arena (`crate::upload`): CPU-written each frame
+/// and read-only by shaders, so kept in shared memory instead of stealing
+/// card VRAM from shader-written buffers.
+pub(crate) fn register_upload(resource: usize, start: u64, len: u64) {
+    register_kind(resource, start, len, BufferKind::UploadArena);
+}
+
+fn register_kind(resource: usize, start: u64, len: u64, kind: BufferKind) {
     buffers().insert(
         (start, resource),
         Entry {
             end: start + len,
+            kind,
             shadow: None,
         },
     );
@@ -4999,7 +5097,7 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
         crate::host::name(&buffer, || format!("title buffer {:#x}+{len:#x}", key.0));
         // A big one, with `cards`: shaders get a buffer in the card's own
         // memory, and the one just made is the CPU's side.
-        let (buffer, card) = match card_for(size) {
+        let (buffer, card) = match card_for(size, entry.kind) {
             Some(on_card) => {
                 crate::host::name(&on_card, || format!("title buffer {:#x}+{len:#x} on the card", key.0));
                 tracing::info!(

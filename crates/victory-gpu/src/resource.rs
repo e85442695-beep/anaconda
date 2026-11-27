@@ -1811,10 +1811,19 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
     )
 }
 
+/// Live bytes of dead unmapped render targets retired so far.
+#[cfg(windows)]
+static RT_FREED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(windows)]
+pub(crate) fn rt_freed_bytes() -> u64 {
+    RT_FREED_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Small emergency cushion (+128 MiB) when `!room` and `VICTORY_TILES_TAIL_ALWAYS=1`
 /// so tiny/tail-only placed textures still upload instead of rendering pitch black,
-/// while still staying under the physical DXGI local VRAM budget so WDDM never
-/// starts paging render targets over PCIe.
+/// while still honoring the DXGI VRAM budget and reserved room for render targets
+/// and card buffers so WDDM never starts paging over PCIe.
 #[cfg(windows)]
 pub(crate) fn room_emergency(memory: Option<[u64; 4]>) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
@@ -1834,7 +1843,12 @@ pub(crate) fn room_emergency(memory: Option<[u64; 4]>) -> bool {
         return false;
     }
     match memory {
-        Some([budget, used, ..]) => used < budget / 100 * 96,
+        Some([budget, used, ..]) => {
+            used.saturating_sub(crate::pool::texture_room())
+                + crate::shadow::card_room_kept()
+                + targets_room_kept()
+                < budget / 100 * 96
+        }
         None => true,
     }
 }
@@ -2279,6 +2293,60 @@ pub(crate) fn let_go_idle() {
                 first = Some(at);
             }
             crate::host::retire(host);
+        }
+    }
+    // Reclaim 100%-dead placed render targets whose title backing memory has
+    // already been unmapped by the title (at most once per second, under
+    // low-VRAM or >= 85% budget pressure). Never touches mapped or live RTs.
+    static LAST_RT_SWEEP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let rt_pressure = memory.is_some_and(|[budget, used, ..]| {
+        budget <= (6 << 30) || u128::from(used) * 100 >= u128::from(budget) * 85
+    });
+    let now_ms = crate::host::now_ms();
+    if rt_pressure && now_ms.saturating_sub(LAST_RT_SWEEP.load(Relaxed)) >= 1000 {
+        LAST_RT_SWEEP.store(now_ms, Relaxed);
+        let mut rt_freed = 0u64;
+        for &at in all.iter() {
+            // SAFETY: `all` holds the textures table lock.
+            let r = unsafe { &*(at as *const Resource) };
+            if fills(&r.desc) || !r.host.placed.load(Relaxed) {
+                continue;
+            }
+            let used = r.host.used.load(Relaxed);
+            if used == 0 || !crate::host::long_ago(used, 5_000, 12) {
+                continue;
+            }
+            if crate::texture::committed(r.data().cast_const(), 1) {
+                continue;
+            }
+            let gone = {
+                let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+                let dead = made.as_ref().is_some_and(|(host, twin)| {
+                    crate::host::long_ago(r.host.used.load(Relaxed), 5_000, 12)
+                        && std::sync::Arc::strong_count(host) == 1
+                        && crate::host::references(&host.texture) == 1
+                        && twin
+                            .as_ref()
+                            .is_none_or(|t| crate::host::references(&t.colour.texture) == 1)
+                });
+                if dead {
+                    crate::texture::unstage(at as This);
+                    made.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((host, twin)) = gone {
+                let freed = host.bytes + twin.as_ref().map_or(0, |t| t.colour.bytes);
+                rt_freed += freed;
+                crate::host::retire(host);
+                if let Some(twin) = twin {
+                    crate::host::retire(twin);
+                }
+            }
+        }
+        if rt_freed > 0 {
+            RT_FREED_BYTES.fetch_add(rt_freed, Relaxed);
         }
     }
     SWEPT_US[0].fetch_add(1, Relaxed);
@@ -2873,7 +2941,8 @@ fn hand_out_resource(
     #[cfg(windows)]
     if desc.dimension == BUFFER {
         let at = std::ptr::from_ref::<Resource>(&resource) as usize;
-        crate::shadow::register(at, resource.data() as u64, desc.width);
+        const ALLOW_UAV: u32 = 4;
+        crate::shadow::register_with(at, resource.data() as u64, desc.width, desc.flags & ALLOW_UAV != 0);
     }
     object::hand_out(RESOURCE, resource, iid, &RESOURCE_IIDS, out)
 }

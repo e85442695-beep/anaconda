@@ -41,6 +41,7 @@ pub mod frame;
 mod framegen;
 #[cfg(windows)]
 mod fps_hud;
+pub mod input_glyphs;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod book;
 #[cfg(windows)]

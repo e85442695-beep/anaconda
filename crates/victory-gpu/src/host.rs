@@ -4797,6 +4797,7 @@ impl Host {
             CARD_STATS[4].fetch_add(total, Ordering::Relaxed);
             CARD_STATS[5].fetch_add(1, Ordering::Relaxed);
             CARD_STATS[6].fetch_add(us, Ordering::Relaxed);
+            crate::shadow::note_card_fetch(total);
         }
         let merging = std::time::Instant::now();
         let _merging = crate::timeline::span("landing: merging fetched pieces");
@@ -8721,6 +8722,7 @@ struct Presenter {
     composer: Option<crate::compose::Composer>,
     framegen: Option<crate::framegen::FrameGen>,
     fps_hud: crate::fps_hud::FpsHud,
+    input_glyphs: crate::input_glyphs::InputGlyphsHud,
     #[cfg(feature = "diagnostics")]
     panel: panel::Panel,
 }
@@ -8736,6 +8738,7 @@ struct PerformanceWindow {
     dropped: u64,
     cpu_prepare_ms: f64,
     copy_prepare_ms: f64,
+    copy_mb: f64,
     texture_prepare_ms: f64,
     gpu_wait_ms: f64,
     queue_idle_ms: f64,
@@ -8755,6 +8758,7 @@ impl PerformanceWindow {
         self.dropped += sample.dropped;
         self.cpu_prepare_ms += sample.cpu_prepare_ms;
         self.copy_prepare_ms += sample.copy_prepare_ms;
+        self.copy_mb += sample.copy_mb;
         self.texture_prepare_ms += sample.texture_prepare_ms;
         self.gpu_wait_ms += sample.gpu_wait_ms;
         self.queue_idle_ms += sample.queue_idle_ms;
@@ -8770,6 +8774,9 @@ impl PerformanceWindow {
         let mib = |index: usize| video_memory.map(|memory| memory[index] >> 20);
         let phase_ms = |i: usize| PERF_PHASES[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames;
         let (card_refused, card_refused_bytes) = crate::shadow::card_refused_stats();
+        let (card_cap_refused, card_cap_refused_bytes) = crate::shadow::card_cap_refused_stats();
+        let [snap_bytes, cpu_cmp_bytes, card_fetch_bytes] = crate::shadow::take_perf_back_bytes();
+        let mb_pf = |b: u64| b as f64 / (1 << 20) as f64 / frames;
         tracing::info!(
             target: "victory_gpu::performance",
             seconds = format_args!("{:.2}", self.elapsed_ms / 1000.0),
@@ -8782,6 +8789,7 @@ impl PerformanceWindow {
             dropped_per_frame = format_args!("{:.1}", self.dropped as f64 / frames),
             cpu_prepare_ms = format_args!("{:.1}", self.cpu_prepare_ms / frames),
             copy_prepare_ms = format_args!("{:.1}", self.copy_prepare_ms / frames),
+            copy_mb = format_args!("{:.1}", self.copy_mb / frames),
             texture_prepare_ms = format_args!("{:.1}", self.texture_prepare_ms / frames),
             gpu_wait_ms = format_args!("{:.1}", self.gpu_wait_ms / frames),
             gpu_queue_busy_est_ms = format_args!("{:.1}", queue_busy_ms / frames),
@@ -8789,23 +8797,30 @@ impl PerformanceWindow {
             ask_watch_ms = format_args!("{:.1}", phase_ms(0)),
             deferred_ms = format_args!("{:.1}", phase_ms(1)),
             snap_ms = format_args!("{:.1}", phase_ms(2)),
+            snap_mb = format_args!("{:.1}", mb_pf(snap_bytes)),
             card_before_ms = format_args!("{:.1}", phase_ms(3)),
             heaps_ms = format_args!("{:.1}", phase_ms(4)),
             card_back_ms = format_args!("{:.1}", phase_ms(5)),
+            card_fetch_mb = format_args!("{:.1}", mb_pf(card_fetch_bytes)),
             cpu_back_ms = format_args!("{:.1}", phase_ms(6)),
+            cpu_cmp_mb = format_args!("{:.1}", mb_pf(cpu_cmp_bytes)),
             sweep_ms = format_args!("{:.1}", phase_ms(7)),
             local_used_mib = ?mib(1),
             local_budget_mib = ?mib(0),
             shared_used_mib = ?mib(3),
             shared_budget_mib = ?mib(2),
             rt_mib = crate::resource::render_target_bytes() >> 20,
+            rt_freed_mib = crate::resource::rt_freed_bytes() >> 20,
             tex_mib = crate::resource::filled_texture_bytes() >> 20,
+            pool_mib = crate::pool::texture_blocks_mib(),
             tiled_mib = crate::tiles::given_total() >> 20,
             tiled_heaps_mib = crate::tiles::heaps_total() >> 20,
             tiled_freed = crate::tiles::heaps_returned(),
             card_buf_mib = crate::shadow::card_vram_bytes() >> 20,
             card_refused,
             card_refused_mib = card_refused_bytes >> 20,
+            card_cap_refused,
+            card_cap_refused_mib = card_cap_refused_bytes >> 20,
             staging_mib = crate::texture::live_staging_bytes() >> 20,
             "render performance window"
         );
@@ -8915,6 +8930,7 @@ impl Meter {
             dropped: dropped_count,
             cpu_prepare_ms: cpu * frames,
             copy_prepare_ms: copy_ms * frames,
+            copy_mb: copy_mb * frames,
             texture_prepare_ms: texture_ms * frames,
             gpu_wait_ms: gpu * frames,
             queue_idle_ms: queue_idle * frames,
@@ -9417,6 +9433,8 @@ impl Host {
             p.panel.draw(self, copy, &back, (width, height), format);
             p.fps_hud
                 .draw(self, list, &back, (width, height), format, |r| copy.keep(r));
+            p.input_glyphs
+                .draw(self, list, &back, (width, height), format, |r| copy.keep(r));
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
             if composed {
@@ -9468,6 +9486,7 @@ impl Host {
             p.panel.frame(p.meter.line_due());
             p.meter.frame(p.hwnd);
             p.fps_hud.tick(self, fg_generated);
+            p.input_glyphs.tick();
             showing.end();
             #[cfg(feature = "diagnostics")]
             return Some(probe.is_some_and(|b| crate::capture::black(&b)));
@@ -9629,7 +9648,7 @@ impl Host {
                                 if over_state != psrv {
                                     post.push(transition(over, psrv, over_state));
                                 }
-                                if p.fps_hud.active() {
+                                if p.fps_hud.active() || p.input_glyphs.active() {
                                     post.push(transition(
                                         &gen_back,
                                         D3D12_RESOURCE_STATE_RENDER_TARGET,
@@ -9637,6 +9656,14 @@ impl Host {
                                     ));
                                     list.ResourceBarrier(&post);
                                     p.fps_hud.draw(
+                                        self,
+                                        list,
+                                        &gen_back,
+                                        (width, height),
+                                        format,
+                                        |r| copy.keep(r),
+                                    );
+                                    p.input_glyphs.draw(
                                         self,
                                         list,
                                         &gen_back,
@@ -9678,6 +9705,9 @@ impl Host {
                     ]);
                     list.CopyResource(&gen_back, interp_res);
                     p.fps_hud.draw(self, list, &gen_back, (width, height), format, |r| {
+                        copy.keep(r)
+                    });
+                    p.input_glyphs.draw(self, list, &gen_back, (width, height), format, |r| {
                         copy.keep(r)
                     });
                     list.ResourceBarrier(&[
@@ -9772,6 +9802,7 @@ impl Host {
                 composer: None,
                 framegen: None,
                 fps_hud: crate::fps_hud::FpsHud::new(),
+                input_glyphs: crate::input_glyphs::InputGlyphsHud::new(),
                 #[cfg(feature = "diagnostics")]
                 panel: panel::Panel::new(),
             })

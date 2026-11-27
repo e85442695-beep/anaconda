@@ -111,8 +111,33 @@ trait Source: Send {
     fn pad(&mut self, slot: usize) -> Option<PadState>;
     /// Keys held down; none while the title's window lacks focus.
     fn keys(&mut self) -> Vec<KeyState>;
+    /// Whether host mouse movement or mouse buttons were active on this poll
+    /// (used solely for automatic Xbox <-> KBM glyph switching; never alters controls).
+    fn mouse_active(&mut self) -> bool {
+        false
+    }
     /// Motor speeds: low frequency (left), high frequency (right).
     fn rumble(&mut self, slot: usize, low: u16, high: u16);
+}
+
+/// Returns true when a real physical XInput pad shows intentional user input
+/// above analog stick/trigger deadzones (ignoring idle stick drift).
+fn pad_is_active(pad: &PadState) -> bool {
+    const STICK_DEADZONE: f32 = 0.22;
+    const TRIGGER_DEADZONE: f32 = 0.12;
+    pad.buttons != 0
+        || pad.left_trigger > TRIGGER_DEADZONE
+        || pad.right_trigger > TRIGGER_DEADZONE
+        || pad.left_x.abs() > STICK_DEADZONE
+        || pad.left_y.abs() > STICK_DEADZONE
+        || pad.right_x.abs() > STICK_DEADZONE
+        || pad.right_y.abs() > STICK_DEADZONE
+}
+
+/// Returns true when any non-overlay gameplay key is held (ignores F1..F12
+/// overlay hotkeys such as F3/F4/F6/F9 so toggling HUDs never flips glyphs).
+fn keys_are_active(keys: &[KeyState]) -> bool {
+    keys.iter().any(|k| !(0x70..=0x7B).contains(&k.virtual_key))
 }
 
 fn fallback(keys: &[KeyState]) -> PadState {
@@ -430,11 +455,22 @@ impl Hub {
 
     /// Reads the host once; device callbacks run on the calling thread.
     fn poll(&self) {
-        let (pads, keys) = {
+        let (pads, keys, mouse_active) = {
             let mut source = lock(&self.source);
             let pads: [_; PADS] = std::array::from_fn(|slot| source.pad(slot));
-            (pads, source.keys())
+            let keys = source.keys();
+            let mouse_active = source.mouse_active();
+            (pads, keys, mouse_active)
         };
+        // Update automatic Input Glyphs active device based on physical host
+        // activity without touching any control bindings or readings.
+        let real_pad_active = pads.iter().flatten().any(pad_is_active);
+        let kbm_active = mouse_active || keys_are_active(&keys);
+        if real_pad_active {
+            victory_gpu::input_glyphs::note_gamepad_activity();
+        } else if kbm_active {
+            victory_gpu::input_glyphs::note_kbm_activity();
+        }
         let events = self.state().poll(&self.devices, self.one_pad, pads, keys);
         self.deliver(events);
     }
@@ -1119,9 +1155,11 @@ pub(crate) fn module() -> HleModule {
 mod host {
     use std::time::{Duration, Instant};
 
+    use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW,
+        GetAsyncKeyState, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+        VK_XBUTTON1, VK_XBUTTON2,
     };
     use windows_sys::Win32::UI::Input::XboxController::{
         XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_BACK,
@@ -1132,7 +1170,7 @@ mod host {
         XInputSetState,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId,
+        GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
     };
 
     use super::*;
@@ -1177,6 +1215,7 @@ mod host {
     #[derive(Default)]
     pub(super) struct Host {
         empty_until: [Option<Instant>; PADS],
+        last_cursor: Option<(i32, i32)>,
     }
 
     impl Source for Host {
@@ -1229,6 +1268,32 @@ mod host {
                     ..Default::default()
                 })
                 .collect()
+        }
+
+        fn mouse_active(&mut self) -> bool {
+            if !focused() {
+                self.last_cursor = None;
+                return false;
+            }
+            const MOUSE_BUTTONS: [u16; 5] = [
+                VK_LBUTTON,
+                VK_RBUTTON,
+                VK_MBUTTON,
+                VK_XBUTTON1,
+                VK_XBUTTON2,
+            ];
+            let button_down = MOUSE_BUTTONS
+                .iter()
+                // SAFETY: plain key state query.
+                .any(|&vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0);
+            let mut pt = POINT { x: 0, y: 0 };
+            let moved = if unsafe { GetCursorPos(&mut pt) } != 0 {
+                let prev = self.last_cursor.replace((pt.x, pt.y));
+                prev.is_some_and(|(px, py)| (pt.x - px).abs() + (pt.y - py).abs() >= 4)
+            } else {
+                false
+            };
+            button_down || moved
         }
 
         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
@@ -1329,6 +1394,7 @@ mod tests {
     struct FakeHost {
         pads: [Option<PadState>; PADS],
         keys: Vec<KeyState>,
+        mouse_active: bool,
         rumble: Vec<(usize, u16, u16)>,
     }
 
@@ -1340,6 +1406,9 @@ mod tests {
         }
         fn keys(&mut self) -> Vec<KeyState> {
             self.0.lock().unwrap().keys.clone()
+        }
+        fn mouse_active(&mut self) -> bool {
+            self.0.lock().unwrap().mouse_active
         }
         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
             self.0.lock().unwrap().rumble.push((slot, low, high));
@@ -1705,5 +1774,62 @@ mod tests {
         rumble(&hub.devices[FALLBACK], &[1.0; 4]);
         rumble(device, std::ptr::null());
         assert_eq!(host.lock().unwrap().rumble, [(2, 32767, 65535), (2, 0, 0)]);
+    }
+
+    #[test]
+    fn active_input_device_switches_automatically_without_altering_controls() {
+        use victory_gpu::input_glyphs::{ActiveDevice, GlyphMode, active_device, set_mode};
+        set_mode(GlyphMode::Auto);
+        let (hub, host) = fake_with(true);
+
+        // Keyboard press -> KBM glyphs active, and fallback pad mapping still works unchanged.
+        host.lock().unwrap().keys = vec![KeyState {
+            virtual_key: b'W',
+            ..Default::default()
+        }];
+        hub.poll();
+        assert_eq!(active_device(), ActiveDevice::KeyboardMouse);
+
+        // Idle stick drift (< 0.22) must NOT flip back to Gamepad.
+        {
+            let mut h = host.lock().unwrap();
+            h.keys.clear();
+            h.pads[0] = Some(PadState {
+                left_x: 0.10,
+                right_y: -0.15,
+                ..Default::default()
+            });
+        }
+        hub.poll();
+        assert_eq!(active_device(), ActiveDevice::KeyboardMouse);
+
+        // Real gamepad button press -> switches immediately to Gamepad.
+        host.lock().unwrap().pads[0] = Some(PadState {
+            buttons: A,
+            ..Default::default()
+        });
+        hub.poll();
+        assert_eq!(active_device(), ActiveDevice::Gamepad);
+
+        // Overlay hotkey F6 (0x75) must NOT switch back to KBM.
+        {
+            let mut h = host.lock().unwrap();
+            h.pads[0] = Some(PadState::default());
+            h.keys = vec![KeyState {
+                virtual_key: 0x75,
+                ..Default::default()
+            }];
+        }
+        hub.poll();
+        assert_eq!(active_device(), ActiveDevice::Gamepad);
+
+        // Mouse movement / click -> switches back to KeyboardMouse.
+        {
+            let mut h = host.lock().unwrap();
+            h.keys.clear();
+            h.mouse_active = true;
+        }
+        hub.poll();
+        assert_eq!(active_device(), ActiveDevice::KeyboardMouse);
     }
 }
