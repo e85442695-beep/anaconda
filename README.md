@@ -8,7 +8,24 @@
   <strong>Low-VRAM (4 GB) &amp; No-RT fork of VIctory / cool_fox with built-in Series S FSR + RCAS upscaling and AMD FSR 3-style Optical Flow Frame Generation.</strong>
 </p>
 
+<p align="center">
+  <a href="https://e85442695-beep.github.io/anaconda/"><strong>Project Website &amp; Live Video</strong></a>
+  &nbsp;&middot;&nbsp;
+  <a href="https://github.com/e85442695-beep/anaconda/releases/tag/v0.1-demo"><strong>GTX 1650 4 GB Capture (Release v0.1-demo)</strong></a>
+</p>
+
 > **This repository contains no game files, code, or assets.** You must supply your own Xbox Series dump at runtime. Not affiliated with or endorsed by any game developer or publisher.
+
+---
+
+## Live Gameplay Capture (GTX 1650 4 GB, No-RT, Native FPS)
+
+[![Watch Anaconda running on GTX 1650 4 GB](https://e85442695-beep.github.io/anaconda/media/readme-video-thumb.jpg)](https://e85442695-beep.github.io/anaconda/#demo)
+
+*Click the preview above to watch the full 1080p capture in your browser on the [Anaconda site](https://e85442695-beep.github.io/anaconda/#demo), or download the raw MP4 directly from [Release v0.1-demo](https://github.com/e85442695-beep/anaconda/releases/download/v0.1-demo/anaconda-gtx1650-demo.mp4).*
+
+- **Test rig:** NVIDIA GeForce GTX 1650 4 GB GDDR5 (Turing TU117, no hardware RT cores) + AMD Ryzen 5 5500 + 16 GB RAM, Windows 11.
+- **Measured progress (Frame Generation OFF):** `2.9–3.3 FPS` (`300–345 ms/frame`) → **`4.0–5.1 FPS`** (`196–250 ms/frame`), tiled texture heaps reduced from `832 MiB` → **`480 MiB`** (`-352 MiB` VRAM via 16 MiB best-fit heaps).
 
 ---
 
@@ -65,16 +82,18 @@ Optionally copy [`docs/settings-very-low.xml`](docs/settings-very-low.xml) into:
 
 | Variable | Default in `Play-Anaconda.cmd` | Purpose |
 |---|---|---|
+| `VICTORY_DISPLAY_MODE` | `1280x720` | Display mode reported to the title via DXGI |
 | `VICTORY_VRAM_MB` | `3050` | Caps DXGI local VRAM budget (MiB) for 4 GB cards |
-| `VICTORY_FSR_SCALE` | `2.0` | Internal FSR render scale (`1.5`=Quality, `1.7`=Balanced, `2.0`=Performance) |
-| `VICTORY_FSR_SHARPEN` | `0.55` | RCAS contrast-adaptive sharpening strength (`0.0`–`1.0`) |
-| `VICTORY_FRAME_GEN` | `1` (`2x`) | AMD FSR 3-style Optical Flow Frame Generation (`0`=off, `1`/`2`=2x, `3`=3x, `4`=4x; HUD-less) |
-| `VICTORY_FRAME_GEN_CUT` | `0.22` | Global luma MAD scene-cut rejection threshold (`0.05`–`1.0`) |
-| `VICTORY_FPS_HUD` | `right` | On-screen FPS / FG / frametime / VRAM overlay (`right`, `left`, `bottom-right`, `bottom-left`, `0`=off; toggle live with `F4`) |
-| `VICTORY_VSYNC` | `1` | Swap-chain sync interval (`0`=off, `1`=VSync, `2`=half-rate) |
-| `VICTORY_LEVELS_ON_DEMAND` | `1` | Tiled on-demand mip residency |
+| `VICTORY_TILES_HEAP_MB` | `16` | Granularity of tiled resource pools (auto 16 MiB + best-fit on `<= 6 GiB` GPUs) |
+| `VICTORY_TEXTURE_BUDGET_MB` | `900` | Upper cap on texture VRAM without bypassing DXGI budget or RT/buffer reserves |
 | `VICTORY_TEXTURE_MAX_DIM` | `256` | Caps tiled mip uploads & staging buffers at 256 px (~62× smaller staging RAM) |
-| `VICTORY_TEXTURE_BUDGET_MB` | `1400` | Texture VRAM pool budget (MiB) |
+| `VICTORY_CARD_BUFFERS_MIN_KB` / `_MB` | `64` / `448` | Keeps shader-written title buffers resident in VRAM instead of PCIe Shared RAM |
+| `VICTORY_RELAY` | `2` | Stage-2 per-range async relay (avoids full-flight GPU stalls) |
+| `VICTORY_FSR_SCALE` | `1.35` | Internal FSR render scale (`1.35`–`2.0`) |
+| `VICTORY_FSR_SHARPEN` | `0.55` | RCAS contrast-adaptive sharpening strength (`0.0`–`1.0`) |
+| `VICTORY_FRAME_GEN` | `0` (set `1` for `2x`) | AMD FSR 3-style Optical Flow Frame Generation (`0`=off, `1`/`2`=2x, `3`=3x, `4`=4x; HUD-less) |
+| `VICTORY_FPS_HUD` | `right` | On-screen FPS / FG / frametime / VRAM overlay (`right`, `left`, `bottom-right`, `bottom-left`, `0`=off; toggle live with `F4`) |
+| `VICTORY_VSYNC` | `0` | Swap-chain sync interval (`0`=off, `1`=VSync, `2`=half-rate) |
 | `VICTORY_SHADER_OPT` | `63` | Proven DXIL shader optimization passes |
 | `VICTORY_AMBIENT` / `VICTORY_AMBIENT_SPECULAR` | `0.90` / `1` | Software diffuse GI + specular reflections stand-in without hardware RT |
 
