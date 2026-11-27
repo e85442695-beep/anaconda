@@ -8664,6 +8664,14 @@ pub(crate) fn vram_target() -> Option<u64> {
 
 const BUFFERS: u32 = 3;
 
+fn swap_buffers() -> u32 {
+    if crate::framegen::enabled() {
+        4
+    } else {
+        BUFFERS
+    }
+}
+
 fn vsync_interval() -> u32 {
     static INTERVAL: OnceLock<u32> = OnceLock::new();
     *INTERVAL.get_or_init(|| match std::env::var("VICTORY_VSYNC").ok().as_deref().map(str::trim) {
@@ -8686,6 +8694,7 @@ struct Presenter {
     hwnd: HWND,
     meter: Meter,
     composer: Option<crate::compose::Composer>,
+    framegen: Option<crate::framegen::FrameGen>,
     #[cfg(feature = "diagnostics")]
     panel: panel::Panel,
 }
@@ -8696,6 +8705,7 @@ struct Presenter {
 struct PerformanceWindow {
     elapsed_ms: f64,
     frames: u32,
+    generated: u32,
     draws: u64,
     dropped: u64,
     cpu_prepare_ms: f64,
@@ -8714,6 +8724,7 @@ impl PerformanceWindow {
 
         self.elapsed_ms += sample.elapsed_ms;
         self.frames += sample.frames;
+        self.generated += sample.generated;
         self.draws += sample.draws;
         self.dropped += sample.dropped;
         self.cpu_prepare_ms += sample.cpu_prepare_ms;
@@ -8727,6 +8738,7 @@ impl PerformanceWindow {
         }
 
         let frames = f64::from(self.frames);
+        let shown = f64::from(self.frames + self.generated);
         let queue_busy_ms = (self.elapsed_ms - self.queue_idle_ms).max(0.0);
         let video_memory = HOST.get().and_then(Option::as_ref).and_then(Host::video_memory);
         let mib = |index: usize| video_memory.map(|memory| memory[index] >> 20);
@@ -8734,7 +8746,9 @@ impl PerformanceWindow {
             target: "victory_gpu::performance",
             seconds = format_args!("{:.2}", self.elapsed_ms / 1000.0),
             frames = self.frames,
+            fg_generated = self.generated,
             fps = format_args!("{:.2}", frames * 1000.0 / self.elapsed_ms),
+            shown_fps = format_args!("{:.2}", shown * 1000.0 / self.elapsed_ms),
             frame_ms = format_args!("{:.1}", self.elapsed_ms / frames),
             draws_per_frame = format_args!("{:.0}", self.draws as f64 / frames),
             dropped_per_frame = format_args!("{:.1}", self.dropped as f64 / frames),
@@ -8759,6 +8773,7 @@ impl PerformanceWindow {
 struct Meter {
     since: std::time::Instant,
     frames: u32,
+    generated: u32,
     performance: PerformanceWindow,
     #[cfg(feature = "diagnostics")]
     copy_stats_frames: u64,
@@ -8774,6 +8789,7 @@ impl Meter {
         Meter {
             since: now,
             frames: 0,
+            generated: 0,
             performance: PerformanceWindow::default(),
             #[cfg(feature = "diagnostics")]
             copy_stats_frames: 0,
@@ -8781,6 +8797,10 @@ impl Meter {
             logged: now,
             caption: None,
         }
+    }
+
+    fn note_generated(&mut self, count: u32) {
+        self.generated = self.generated.saturating_add(count);
     }
 
     /// Whether the next frame counted makes the frame-rate line.
@@ -8806,12 +8826,16 @@ impl Meter {
         }
         let drawn = crate::draw::drawn();
         let presented = self.frames;
+        let generated = self.generated;
         let frames = f64::from(presented);
+        let shown_frames = f64::from(presented + generated);
         let fps = frames / elapsed.as_secs_f64();
+        let shown_fps = shown_frames / elapsed.as_secs_f64();
         let ms = elapsed.as_secs_f64() * 1000.0 / frames;
         let draw_count = drawn - self.drawn;
         let draws = draw_count as f64 / frames;
-        (self.since, self.frames, self.drawn) = (std::time::Instant::now(), 0, drawn);
+        (self.since, self.frames, self.generated, self.drawn) =
+            (std::time::Instant::now(), 0, 0, drawn);
         // Of a frame, ms preparing submissions and ms waiting for the GPU.
         let [cpu, gpu] = [0, 1].map(|i| {
             SUBMISSION_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames
@@ -8841,6 +8865,7 @@ impl Meter {
         self.performance.record(PerformanceWindow {
             elapsed_ms: elapsed.as_secs_f64() * 1000.0,
             frames: presented,
+            generated,
             draws: draw_count,
             dropped: dropped_count,
             cpu_prepare_ms: cpu * frames,
@@ -9058,7 +9083,14 @@ impl Meter {
             self.caption = Some(buffer);
         }
         let Some(caption) = &self.caption else { return };
-        let text = format!(" | VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
+        let text = if generated > 0 {
+            let mult = crate::framegen::multiplier();
+            format!(
+                " | VIctory {fps:.0} fps (AMD FG {mult}x: {shown_fps:.0} fps) {ms:.1} ms/frame {draws:.0} draws/frame"
+            )
+        } else {
+            format!(" | VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame")
+        };
         let mut text: Vec<u16> = caption.iter().copied().chain(text.encode_utf16()).collect();
         text.push(0);
         // Setting the text waits for the window's thread (a title thread,
@@ -9153,13 +9185,21 @@ impl Host {
             settle_now(WHY_SYNC);
             // SAFETY: no back buffer is held; every submission was waited for.
             let resized = unsafe {
-                p.swap_chain
-                    .ResizeBuffers(BUFFERS, width, height, format, DXGI_SWAP_CHAIN_FLAG(0))
+                p.swap_chain.ResizeBuffers(
+                    swap_buffers(),
+                    width,
+                    height,
+                    format,
+                    DXGI_SWAP_CHAIN_FLAG(0),
+                )
             };
             match resized {
                 Ok(()) => {
                     if p.format != format {
                         p.composer = None;
+                    }
+                    if let Some(fg) = p.framegen.as_mut() {
+                        fg.reset();
                     }
                     (p.width, p.height, p.format) = (width, height, format);
                     tracing::info!(
@@ -9188,6 +9228,9 @@ impl Host {
             }
         }
         let state = D3D12_RESOURCE_STATES(state_u32 as i32);
+        if crate::framegen::enabled() {
+            self.present_generated(p, texture, state, planes, &desc, width, height, format);
+        }
         // SAFETY: our swap chain, list and live source texture(s).
         unsafe {
             let index = p.swap_chain.GetCurrentBackBufferIndex();
@@ -9383,6 +9426,228 @@ impl Host {
         }
     }
 
+    fn present_generated(
+        &self,
+        p: &mut Presenter,
+        texture: &ID3D12Resource,
+        state: D3D12_RESOURCE_STATES,
+        planes: Option<(&ID3D12Resource, D3D12_RESOURCE_STATES, DXGI_FORMAT, DXGI_FORMAT)>,
+        desc: &D3D12_RESOURCE_DESC,
+        width: u32,
+        height: u32,
+        format: DXGI_FORMAT,
+    ) {
+        static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if FAILED.load(Ordering::Relaxed) {
+            return;
+        }
+        let base_fmt = match planes {
+            Some((_, _, bf, _)) => bf,
+            None if format == DXGI_FORMAT_R8G8B8A8_UNORM => match crate::compose::view(desc) {
+                Some(bf) => bf,
+                None => return,
+            },
+            None => return,
+        };
+        if p.framegen.is_none() {
+            match crate::framegen::FrameGen::new(self) {
+                Ok(fg) => p.framegen = Some(fg),
+                Err(e) => {
+                    FAILED.store(true, Ordering::Relaxed);
+                    tracing::warn!(error = %e, "AMD FrameGen failed to initialize; running native frames");
+                    return;
+                }
+            }
+        }
+        let has_prev = match p.framegen.as_mut().unwrap().prepare_targets(self, width, height) {
+            Ok(ready) => ready,
+            Err(e) => {
+                tracing::warn!(error = %e, width, height, "AMD FrameGen target alloc failed; skipping frame");
+                return;
+            }
+        };
+
+        let srv_all = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+            | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        let psrv = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        let pick_slot = |ahead: &mut Vec<(HostList, u64)>| -> Option<usize> {
+            if !late_free_present() {
+                return None;
+            }
+            let finished = FINISHED.load(Ordering::Acquire);
+            ahead.iter().position(|(_, flown)| *flown <= finished).or_else(|| {
+                let list = self.new_list().ok()?;
+                list.close();
+                ahead.push((list, 0));
+                Some(ahead.len() - 1)
+            })
+        };
+
+        if !has_prev {
+            // Seed history on the very first frame (no extra Present yet).
+            let slot = pick_slot(&mut p.ahead);
+            let copy = match slot {
+                Some(i) => &p.ahead[i].0,
+                None => &p.copy,
+            };
+            copy.reset();
+            copy.keep(texture);
+            let list = &copy.list;
+            // SAFETY: open command list, live texture, synchronized state transitions.
+            unsafe {
+                if state != srv_all {
+                    list.ResourceBarrier(&[transition(texture, state, srv_all)]);
+                }
+                let fg = p.framegen.as_mut().unwrap();
+                fg.record_analyze(self, list, texture, base_fmt);
+                fg.record_commit_history(self, list, texture, base_fmt);
+                if state != srv_all {
+                    list.ResourceBarrier(&[transition(texture, srv_all, state)]);
+                }
+            }
+            copy.close();
+            match slot {
+                Some(i) => {
+                    let flown = self.execute_own(copy);
+                    p.ahead[i].1 = flown;
+                }
+                None => self.execute(&[copy]),
+            }
+            return;
+        }
+
+        let mult = crate::framegen::multiplier();
+        let gen_count = mult.saturating_sub(1);
+        for g in 0..gen_count {
+            let alpha = (g + 1) as f32 / mult as f32;
+            // SAFETY: live swap chain, valid back buffer index.
+            let gen_back = unsafe {
+                let idx = p.swap_chain.GetCurrentBackBufferIndex();
+                let Ok(buf) = p.swap_chain.GetBuffer::<ID3D12Resource>(idx) else {
+                    return;
+                };
+                buf
+            };
+            let slot = pick_slot(&mut p.ahead);
+            let copy = match slot {
+                Some(i) => &p.ahead[i].0,
+                None => &p.copy,
+            };
+            copy.reset();
+            copy.keep(texture);
+            let list = &copy.list;
+            let compose_slot = slot.map_or(0, |i| i + 1);
+
+            // SAFETY: open command list, live resources, synchronized transitions.
+            let ok = unsafe {
+                if state != srv_all {
+                    list.ResourceBarrier(&[transition(texture, state, srv_all)]);
+                }
+                let fg = p.framegen.as_mut().unwrap();
+                if g == 0 {
+                    fg.record_analyze(self, list, texture, base_fmt);
+                }
+                fg.record_interpolate(self, list, texture, base_fmt, alpha);
+
+                let presented_ok = if let Some((over, over_state, _, over_fmt)) = planes {
+                    copy.keep(over);
+                    if let (Some(composer), Some((interp_res, interp_fmt))) =
+                        (p.composer.as_mut(), fg.interp_view(base_fmt))
+                    {
+                        let mut pre = Vec::with_capacity(2);
+                        if over_state != psrv {
+                            pre.push(transition(over, over_state, psrv));
+                        }
+                        pre.push(transition(
+                            &gen_back,
+                            D3D12_RESOURCE_STATE_PRESENT,
+                            D3D12_RESOURCE_STATE_RENDER_TARGET,
+                        ));
+                        list.ResourceBarrier(&pre);
+                        match composer.record(
+                            self,
+                            compose_slot,
+                            list,
+                            [(interp_res, interp_fmt), (over, over_fmt)],
+                            &gen_back,
+                            (width, height),
+                        ) {
+                            Ok(()) => {
+                                let mut post = Vec::with_capacity(2);
+                                if over_state != psrv {
+                                    post.push(transition(over, psrv, over_state));
+                                }
+                                post.push(transition(
+                                    &gen_back,
+                                    D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                    D3D12_RESOURCE_STATE_PRESENT,
+                                ));
+                                list.ResourceBarrier(&post);
+                                true
+                            }
+                            Err(err) => {
+                                tracing::warn!(%err, "AMD FrameGen two-plane composite failed; skipping generated frame");
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                } else if let Some(interp_res) = fg.interp_resource() {
+                    list.ResourceBarrier(&[
+                        transition(interp_res, srv_all, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                        transition(
+                            &gen_back,
+                            D3D12_RESOURCE_STATE_PRESENT,
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                        ),
+                    ]);
+                    list.CopyResource(&gen_back, interp_res);
+                    list.ResourceBarrier(&[
+                        transition(interp_res, D3D12_RESOURCE_STATE_COPY_SOURCE, srv_all),
+                        transition(
+                            &gen_back,
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_PRESENT,
+                        ),
+                    ]);
+                    true
+                } else {
+                    false
+                };
+
+                if presented_ok {
+                    if g + 1 == gen_count {
+                        fg.record_commit_history(self, list, texture, base_fmt);
+                    }
+                    if state != srv_all {
+                        list.ResourceBarrier(&[transition(texture, srv_all, state)]);
+                    }
+                }
+                presented_ok
+            };
+
+            copy.close();
+            if !ok {
+                return;
+            }
+            match slot {
+                Some(i) => {
+                    let flown = self.execute_own(copy);
+                    p.ahead[i].1 = flown;
+                }
+                None => self.execute(&[copy]),
+            }
+            // SAFETY: live swap chain, back buffer transitioned to PRESENT.
+            unsafe {
+                let _ = p.swap_chain.Present(vsync_interval(), DXGI_PRESENT(0));
+            }
+            crate::framegen::note_generated(1);
+            p.meter.note_generated(1);
+        }
+    }
+
     fn presenter(
         &self,
         width: u32,
@@ -9406,7 +9671,7 @@ impl Host {
                     Quality: 0,
                 },
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                BufferCount: BUFFERS,
+                BufferCount: swap_buffers(),
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
                 ..Default::default()
             };
@@ -9427,6 +9692,7 @@ impl Host {
                 hwnd,
                 meter: Meter::new(),
                 composer: None,
+                framegen: None,
                 #[cfg(feature = "diagnostics")]
                 panel: panel::Panel::new(),
             })

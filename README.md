@@ -5,7 +5,7 @@
 <h1 align="center">Anaconda</h1>
 
 <p align="center">
-  <strong>Low-VRAM (4 GB) &amp; No-RT fork of VIctory / cool_fox with built-in Series S FSR + RCAS upscaling.</strong>
+  <strong>Low-VRAM (4 GB) &amp; No-RT fork of VIctory / cool_fox with built-in Series S FSR + RCAS upscaling and AMD FSR 3-style Optical Flow Frame Generation.</strong>
 </p>
 
 > **This repository contains no game files, code, or assets.** You must supply your own Xbox Series dump at runtime. Not affiliated with or endorsed by any game developer or publisher.
@@ -19,10 +19,11 @@ Built on top of `codec-d/cool_fox` (`pareto-residency`) and `VIctory`, tuned spe
 1. **<= 4 GB VRAM Cap (`VICTORY_VRAM_MB`)**
    - Hard-caps the host DXGI local VRAM budget (`VICTORY_VRAM_MB=3050`) across texture residency, staging pools, and buffer mirroring (`crates/victory-gpu/src/host.rs`).
    - Triple-buffered swap chain (`BUFFERS=3`) with configurable VSync (`VICTORY_VSYNC=1`) to prevent screen tearing/flickering.
-2. **Built-in Series S FSR + RCAS GPU Compute Upscaler**
-   - Implements `amd_fidelityfx_loader_xbox.dll` directly in Rust (`crates/victory-hle/src/modules/fidelityfx.rs`) backed by a zero-dependency D3D12 `cs_5_1` compute shader with 5-tap clamped RCAS sharpening (`crates/victory-gpu/src/external.rs`).
+2. **Built-in Series S FSR + RCAS GPU Compute Upscaler & AMD FSR 3-Style Frame Generation**
+   - Implements `amd_fidelityfx_loader_xbox.dll` directly in Rust (`crates/victory-hle/src/modules/fidelityfx.rs`) backed by a zero-dependency D3D12 `cs_5_1` compute shader with 5-tap clamped RCAS sharpening and per-channel NaN/Inf recovery (`crates/victory-gpu/src/external.rs`).
    - Full `VICTORY_THIN=1` multi-threaded command list translation support (`BUILTIN_UPSCALE` op in `crates/victory-gpu/src/list/thin.rs`).
-   - Configurable render scale (`VICTORY_FSR_SCALE=2.0` -> `960x540` internal -> `1920x1080` output) and sharpness (`VICTORY_FSR_SHARPEN=0.45`).
+   - Configurable render scale (`VICTORY_FSR_SCALE=2.0` -> `540p` internal -> `720p/1080p` output) and sharpness (`VICTORY_FSR_SHARPEN=0.55`).
+   - **Built-in AMD FSR 3-Style Optical Flow Frame Generation (`VICTORY_FRAME_GEN=1` / `2x`, `3x`, `4x`):** zero external DLLs, ~8 MiB VRAM at 720p (`crates/victory-gpu/src/framegen.rs`). Runs a 4-level coarse-to-fine Zero-Mean SAD bidirectional optical flow pyramid, edge-preserving flow filter, GPU scene-cut detector, and disocclusion-aware 3-hypothesis synthesis strictly on the **HUD-less 3D scene plane (`Plane 0`)**, then composites the crisp UI overlay (`Plane 1`) on top with zero HUD ghosting. Window title and performance logs honestly report both native real FPS and generated output FPS.
 3. **Works Without Hardware Ray Tracing**
    - Software interior ambient lighting compensation (`VICTORY_AMBIENT=0.8`, `VICTORY_AMBIENT_AIR=1.5`) paired with `rtDynamicShadows=false` / `rtLODLightShadows=false` in the Very Low preset.
 4. **Optimized Shader & Texture Streaming**
@@ -66,12 +67,15 @@ Optionally copy [`docs/settings-very-low.xml`](docs/settings-very-low.xml) into:
 |---|---|---|
 | `VICTORY_VRAM_MB` | `3050` | Caps DXGI local VRAM budget (MiB) for 4 GB cards |
 | `VICTORY_FSR_SCALE` | `2.0` | Internal FSR render scale (`1.5`=Quality, `1.7`=Balanced, `2.0`=Performance) |
-| `VICTORY_FSR_SHARPEN` | `0.45` | RCAS contrast-adaptive sharpening strength (`0.0`–`1.0`) |
+| `VICTORY_FSR_SHARPEN` | `0.55` | RCAS contrast-adaptive sharpening strength (`0.0`–`1.0`) |
+| `VICTORY_FRAME_GEN` | `1` (`2x`) | AMD FSR 3-style Optical Flow Frame Generation (`0`=off, `1`/`2`=2x, `3`=3x, `4`=4x; HUD-less) |
+| `VICTORY_FRAME_GEN_CUT` | `0.22` | Global luma MAD scene-cut rejection threshold (`0.05`–`1.0`) |
 | `VICTORY_VSYNC` | `1` | Swap-chain sync interval (`0`=off, `1`=VSync, `2`=half-rate) |
 | `VICTORY_LEVELS_ON_DEMAND` | `1` | Tiled on-demand mip residency |
-| `VICTORY_TEXTURE_DROP` | `0` | Optional mip-drop floor (`1`–`3`) when using `VICTORY_LEVELS_ON_DEMAND=0` + `VICTORY_HELD_LEVELS=1` |
+| `VICTORY_TEXTURE_MAX_DIM` | `256` | Caps tiled mip uploads & staging buffers at 256 px (~62× smaller staging RAM) |
+| `VICTORY_TEXTURE_BUDGET_MB` | `1400` | Texture VRAM pool budget (MiB) |
 | `VICTORY_SHADER_OPT` | `63` | Proven DXIL shader optimization passes |
-| `VICTORY_AMBIENT` / `VICTORY_AMBIENT_AIR` | `0.8` / `1.5` | Software ambient lighting without hardware RT |
+| `VICTORY_AMBIENT` / `VICTORY_AMBIENT_SPECULAR` | `0.90` / `1` | Software diffuse GI + specular reflections stand-in without hardware RT |
 
 ---
 
