@@ -8695,6 +8695,7 @@ struct Presenter {
     meter: Meter,
     composer: Option<crate::compose::Composer>,
     framegen: Option<crate::framegen::FrameGen>,
+    fps_hud: crate::fps_hud::FpsHud,
     #[cfg(feature = "diagnostics")]
     panel: panel::Panel,
 }
@@ -9228,9 +9229,11 @@ impl Host {
             }
         }
         let state = D3D12_RESOURCE_STATES(state_u32 as i32);
-        if crate::framegen::enabled() {
-            self.present_generated(p, texture, state, planes, &desc, width, height, format);
-        }
+        let fg_generated = if crate::framegen::enabled() {
+            self.present_generated(p, texture, state, planes, &desc, width, height, format)
+        } else {
+            0
+        };
         // SAFETY: our swap chain, list and live source texture(s).
         unsafe {
             let index = p.swap_chain.GetCurrentBackBufferIndex();
@@ -9368,6 +9371,8 @@ impl Host {
             };
             #[cfg(feature = "diagnostics")]
             p.panel.draw(self, copy, &back, (width, height), format);
+            p.fps_hud
+                .draw(self, list, &back, (width, height), format, |r| copy.keep(r));
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
             if composed {
@@ -9418,6 +9423,7 @@ impl Host {
             #[cfg(feature = "diagnostics")]
             p.panel.frame(p.meter.line_due());
             p.meter.frame(p.hwnd);
+            p.fps_hud.tick(self, fg_generated);
             showing.end();
             #[cfg(feature = "diagnostics")]
             return Some(probe.is_some_and(|b| crate::capture::black(&b)));
@@ -9436,18 +9442,18 @@ impl Host {
         width: u32,
         height: u32,
         format: DXGI_FORMAT,
-    ) {
+    ) -> u32 {
         static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if FAILED.load(Ordering::Relaxed) {
-            return;
+            return 0;
         }
         let base_fmt = match planes {
             Some((_, _, bf, _)) => bf,
             None if format == DXGI_FORMAT_R8G8B8A8_UNORM => match crate::compose::view(desc) {
                 Some(bf) => bf,
-                None => return,
+                None => return 0,
             },
-            None => return,
+            None => return 0,
         };
         if p.framegen.is_none() {
             match crate::framegen::FrameGen::new(self) {
@@ -9455,7 +9461,7 @@ impl Host {
                 Err(e) => {
                     FAILED.store(true, Ordering::Relaxed);
                     tracing::warn!(error = %e, "AMD FrameGen failed to initialize; running native frames");
-                    return;
+                    return 0;
                 }
             }
         }
@@ -9463,7 +9469,7 @@ impl Host {
             Ok(ready) => ready,
             Err(e) => {
                 tracing::warn!(error = %e, width, height, "AMD FrameGen target alloc failed; skipping frame");
-                return;
+                return 0;
             }
         };
 
@@ -9514,18 +9520,19 @@ impl Host {
                 }
                 None => self.execute(&[copy]),
             }
-            return;
+            return 0;
         }
 
         let mult = crate::framegen::multiplier();
         let gen_count = mult.saturating_sub(1);
+        let mut produced = 0u32;
         for g in 0..gen_count {
             let alpha = (g + 1) as f32 / mult as f32;
             // SAFETY: live swap chain, valid back buffer index.
             let gen_back = unsafe {
                 let idx = p.swap_chain.GetCurrentBackBufferIndex();
                 let Ok(buf) = p.swap_chain.GetBuffer::<ID3D12Resource>(idx) else {
-                    return;
+                    return produced;
                 };
                 buf
             };
@@ -9578,12 +9585,34 @@ impl Host {
                                 if over_state != psrv {
                                     post.push(transition(over, psrv, over_state));
                                 }
-                                post.push(transition(
-                                    &gen_back,
-                                    D3D12_RESOURCE_STATE_RENDER_TARGET,
-                                    D3D12_RESOURCE_STATE_PRESENT,
-                                ));
-                                list.ResourceBarrier(&post);
+                                if p.fps_hud.active() {
+                                    post.push(transition(
+                                        &gen_back,
+                                        D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_COPY_DEST,
+                                    ));
+                                    list.ResourceBarrier(&post);
+                                    p.fps_hud.draw(
+                                        self,
+                                        list,
+                                        &gen_back,
+                                        (width, height),
+                                        format,
+                                        |r| copy.keep(r),
+                                    );
+                                    list.ResourceBarrier(&[transition(
+                                        &gen_back,
+                                        D3D12_RESOURCE_STATE_COPY_DEST,
+                                        D3D12_RESOURCE_STATE_PRESENT,
+                                    )]);
+                                } else {
+                                    post.push(transition(
+                                        &gen_back,
+                                        D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_PRESENT,
+                                    ));
+                                    list.ResourceBarrier(&post);
+                                }
                                 true
                             }
                             Err(err) => {
@@ -9604,6 +9633,9 @@ impl Host {
                         ),
                     ]);
                     list.CopyResource(&gen_back, interp_res);
+                    p.fps_hud.draw(self, list, &gen_back, (width, height), format, |r| {
+                        copy.keep(r)
+                    });
                     list.ResourceBarrier(&[
                         transition(interp_res, D3D12_RESOURCE_STATE_COPY_SOURCE, srv_all),
                         transition(
@@ -9630,7 +9662,7 @@ impl Host {
 
             copy.close();
             if !ok {
-                return;
+                return produced;
             }
             match slot {
                 Some(i) => {
@@ -9645,7 +9677,9 @@ impl Host {
             }
             crate::framegen::note_generated(1);
             p.meter.note_generated(1);
+            produced += 1;
         }
+        produced
     }
 
     fn presenter(
@@ -9693,6 +9727,7 @@ impl Host {
                 meter: Meter::new(),
                 composer: None,
                 framegen: None,
+                fps_hud: crate::fps_hud::FpsHud::new(),
                 #[cfg(feature = "diagnostics")]
                 panel: panel::Panel::new(),
             })

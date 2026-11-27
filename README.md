@@ -70,6 +70,7 @@ Optionally copy [`docs/settings-very-low.xml`](docs/settings-very-low.xml) into:
 | `VICTORY_FSR_SHARPEN` | `0.55` | RCAS contrast-adaptive sharpening strength (`0.0`–`1.0`) |
 | `VICTORY_FRAME_GEN` | `1` (`2x`) | AMD FSR 3-style Optical Flow Frame Generation (`0`=off, `1`/`2`=2x, `3`=3x, `4`=4x; HUD-less) |
 | `VICTORY_FRAME_GEN_CUT` | `0.22` | Global luma MAD scene-cut rejection threshold (`0.05`–`1.0`) |
+| `VICTORY_FPS_HUD` | `right` | On-screen FPS / FG / frametime / VRAM overlay (`right`, `left`, `bottom-right`, `bottom-left`, `0`=off; toggle live with `F4`) |
 | `VICTORY_VSYNC` | `1` | Swap-chain sync interval (`0`=off, `1`=VSync, `2`=half-rate) |
 | `VICTORY_LEVELS_ON_DEMAND` | `1` | Tiled on-demand mip residency |
 | `VICTORY_TEXTURE_MAX_DIM` | `256` | Caps tiled mip uploads & staging buffers at 256 px (~62× smaller staging RAM) |

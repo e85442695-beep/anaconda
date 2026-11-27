@@ -39,6 +39,8 @@ pub mod fence;
 pub mod frame;
 #[cfg(windows)]
 mod framegen;
+#[cfg(windows)]
+mod fps_hud;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod book;
 #[cfg(windows)]

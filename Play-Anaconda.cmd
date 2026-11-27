@@ -68,10 +68,11 @@ if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
 if not defined VICTORY_CARD_AWAKE set "VICTORY_CARD_AWAKE=1"
 if not defined VICTORY_SHOW_AFTER set "VICTORY_SHOW_AFTER=1"
 
-rem 5. Built-in Series S FSR + NaN-safe RCAS GPU compute upscaler + AMD FSR 3-style Optical Flow Frame Generation (2x HUD-less)
+rem 5. Built-in Series S FSR + NaN-safe RCAS GPU compute upscaler + AMD FSR 3-style Optical Flow Frame Generation (2x HUD-less) + on-screen FPS HUD (F4 toggle)
 if not defined VICTORY_FSR_SCALE set "VICTORY_FSR_SCALE=2.0"
 if not defined VICTORY_FSR_SHARPEN set "VICTORY_FSR_SHARPEN=0.55"
 if not defined VICTORY_FRAME_GEN set "VICTORY_FRAME_GEN=1"
+if not defined VICTORY_FPS_HUD set "VICTORY_FPS_HUD=right"
 
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn,victory_gpu::performance=info,victory_gpu::ambient=info,victory_gpu::tiles=info"
 
