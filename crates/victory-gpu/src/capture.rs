@@ -17,7 +17,8 @@ pub(crate) fn folder() -> Option<&'static PathBuf> {
 }
 
 /// Frames listed in `VICTORY_CAPTURE_FRAMES` (comma-separated): saved
-/// too, and their draws traced at debug level.
+/// too, and their draws traced at debug level. F9 in the game window also
+/// selects one frame while a capture folder is configured.
 pub(crate) fn listed(n: u64) -> bool {
     static LIST: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
     let named = LIST
@@ -27,7 +28,8 @@ pub(crate) fn listed(n: u64) -> bool {
                 .filter_map(|f| f.trim().parse().ok())
                 .collect()
         })
-        .contains(&n);
+        .contains(&n)
+        || KEY_FRAME.load(std::sync::atomic::Ordering::Relaxed) == n;
     // `VICTORY_CAPTURE_WORLD`: also the 2nd and the 6th frame after the first
     // one that ran 500 draws or more (a title's first 3D frames: their
     // numbers depend on how long the menus were shown), and the 30th and
@@ -122,10 +124,22 @@ fn world_on() -> bool {
 
 /// The first frame that ran 500 draws or more (`VICTORY_CAPTURE_WORLD`).
 static WORLD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+static KEY_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+static CAPTURE_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn request_frame() {
+    if folder().is_some() {
+        CAPTURE_REQUESTED.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
 
 /// At the present of `frame`: the draws run on the host so far.
 pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     use std::sync::atomic::Ordering::Relaxed;
+    if CAPTURE_REQUESTED.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        KEY_FRAME.store(frame + 1, Relaxed);
+        tracing::info!(frame = frame + 1, "F9: capturing the next frame");
+    }
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let before = LAST.swap(drawn, Relaxed);
     if world_on()
@@ -383,7 +397,14 @@ pub(crate) fn dump_targets(frame: u64) {
         let texture = &copy.texture;
         // SAFETY: a live resource.
         let d = unsafe { texture.GetDesc() };
-        if d.SampleDesc.Count > 1 || d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D {
+        // Also read small FP16 colour LUTs. Their Z slices are stacked in
+        // order in the PNG so unwritten or clipped highlight slices stand out.
+        let colour_lut = d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+            && matches!(d.Format.0, 9 | 10)
+            && (2..=65).contains(&d.Width)
+            && d.Width == u64::from(d.Height)
+            && d.Height == u32::from(d.DepthOrArraySize);
+        if d.SampleDesc.Count > 1 || (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D && !colour_lut) {
             continue;
         }
         // Every submission has run; the dump's list moves it there and back.
@@ -441,7 +462,11 @@ fn dump_one(
             return;
         }
         let pitch = f.RowPitch as usize;
-        let rows = std::slice::from_raw_parts(data.cast::<u8>(), pitch * f.Height as usize);
+        let height = f.Height * f.Depth;
+        let start = footprint.Offset as usize;
+        let allocated = buffer.GetDesc().Width as usize;
+        let extent = (pitch * height as usize).min(allocated.saturating_sub(start));
+        let rows = std::slice::from_raw_parts(data.cast::<u8>().add(start), extent);
         // A 24-bit depth plane comes back as 32-bit words: which depth values
         // (low 24 bits) and which top bytes it holds, the most common first.
         if matches!(d.Format.0, 44..=47) {
@@ -462,12 +487,17 @@ fn dump_one(
             };
             tracing::info!(?resource, depths = ?most(depths), top_bytes = ?most(tops), "24-bit depth plane values (value, texels)");
         }
-        if let Some(rgba) = to_rgba(f.Format.0 as u32, f.Width as usize, f.Height as usize, pitch, rows) {
+        if let Some(rgba) = to_rgba(f.Format.0 as u32, f.Width as usize, height as usize, pitch, rows) {
+            let dimensions = if f.Depth > 1 {
+                format!("{}x{}x{}", d.Width, d.Height, f.Depth)
+            } else {
+                format!("{}x{}", d.Width, d.Height)
+            };
             let name = format!(
-                "frame-{frame}-{i:02}-{resource:?}-{}x{}-f{}",
-                d.Width, d.Height, d.Format.0
+                "frame-{frame}-{i:02}-{resource:?}-{dimensions}-f{}",
+                d.Format.0
             );
-            save_as(&name, f.Width, f.Height, f.Width as usize * 4, false, &rgba);
+            save_as(&name, f.Width, height, f.Width as usize * 4, false, &rgba);
         } else {
             tracing::info!(format = f.Format.0, ?resource, "target not dumped: format");
         }
@@ -540,7 +570,8 @@ fn half(h: u16) -> f32 {
     let (sign, exp, man) = ((h >> 15) as u32, ((h >> 10) & 0x1f) as i32, (h & 0x3ff) as f32);
     let v = match exp {
         0 => man * 2f32.powi(-24),
-        31 => f32::INFINITY,
+        31 if man == 0.0 => f32::INFINITY,
+        31 => f32::NAN,
         e => (1.0 + man / 1024.0) * 2f32.powi(e - 15),
     };
     if sign == 1 { -v } else { v }
@@ -552,7 +583,8 @@ fn small_float(bits: u32, man: u32) -> f32 {
     let (exp, m) = ((bits >> man) & 0x1f, (bits & ((1 << man) - 1)) as f32);
     match exp {
         0 => m / (1 << man) as f32 * 2f32.powi(-14),
-        31 => f32::INFINITY,
+        31 if m == 0.0 => f32::INFINITY,
+        31 => f32::NAN,
         e => (1.0 + m / (1 << man) as f32) * 2f32.powi(e as i32 - 15),
     }
 }
@@ -630,7 +662,13 @@ fn to_rgba(format: u32, w: usize, h: usize, pitch: usize, rows: &[u8]) -> Option
     // lamp on black have the same highest value.
     let above = values.iter().filter(|v| v.iter().any(|c| c.is_finite() && *c > low)).count();
     let nonzero_percent = above as f32 * 100.0 / values.len().max(1) as f32;
-    tracing::info!(format, low, high, nonzero_percent, "target values");
+    let mut nan_channels = 0;
+    let mut infinite_channels = 0;
+    for value in values.iter().flatten() {
+        nan_channels += usize::from(value.is_nan());
+        infinite_channels += usize::from(value.is_infinite());
+    }
+    tracing::info!(format, low, high, nonzero_percent, nan_channels, infinite_channels, "target values");
     // Small float colour targets (the 1x1 luminance and exposure targets):
     // every texel's four channels as numbers. The picture has no alpha and
     // eight bits a channel.

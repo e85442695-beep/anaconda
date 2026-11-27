@@ -255,6 +255,24 @@ static CALLS: Mutex<Vec<(u32, &'static str, String, u64)>> = Mutex::new(Vec::new
 thread_local! {
     /// The pipeline this thread is making (its shaders), for [`CALLS`].
     static LABEL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    static SKIP_STATIC_SAMPLERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// NVIDIA pipeline libraries can restore stale static sampler indices from
+/// another process (VIctory-NVIDIA 7fa0e95, reproduced with PS_CompositeNMB).
+/// Keep the driver's own cache and bypass our library for those pipelines.
+pub(super) fn with_static_samplers(has_samplers: bool) -> StaticSamplerScope {
+    static KEEP: OnceLock<bool> = OnceLock::new();
+    let keep = *KEEP.get_or_init(|| std::env::var_os("VICTORY_LIBRARY_STATIC_SAMPLERS").is_some_and(|v| v == "1"));
+    StaticSamplerScope(SKIP_STATIC_SAMPLERS.replace(has_samplers && !keep))
+}
+
+pub(super) struct StaticSamplerScope(bool);
+
+impl Drop for StaticSamplerScope {
+    fn drop(&mut self) {
+        SKIP_STATIC_SAMPLERS.set(self.0);
+    }
 }
 
 /// Names the pipeline this thread makes next.
@@ -519,11 +537,12 @@ pub(crate) fn pipeline(
     load: impl FnOnce(&ID3D12PipelineLibrary1, PCWSTR) -> windows::core::Result<ID3D12PipelineState>,
     create: impl FnOnce() -> windows::core::Result<ID3D12PipelineState>,
 ) -> windows::core::Result<ID3D12PipelineState> {
-    let wide = HSTRING::from(name);
-    let Some(library) = library() else {
+    let cache = if SKIP_STATIC_SAMPLERS.get() { None } else { library() };
+    let Some(library) = cache else {
         MADE.fetch_add(1, Ordering::Relaxed);
         return create();
     };
+    let wide = HSTRING::from(name);
     let began = std::time::Instant::now();
     let loaded = {
         let _all = one_call();

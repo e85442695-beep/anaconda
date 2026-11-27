@@ -18,13 +18,13 @@ if not exist "%runner%" (
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\Anaconda\cache"
 if not defined VICTORY_DATA_DIR set "VICTORY_DATA_DIR=%LOCALAPPDATA%\Anaconda\data-s"
 
-rem 1. Proven crash-free 4 GB VRAM cap + safe tiled top-mip drop
+rem 1. Proven crash-free 4 GB VRAM cap + 256px max placed-texture cap (prevents black room walls & saves ~1 GB VRAM)
 if not defined VICTORY_VRAM_MB set "VICTORY_VRAM_MB=3050"
 if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
-if not defined VICTORY_LEVELS_MIN_KB set "VICTORY_LEVELS_MIN_KB=512"
-if not defined VICTORY_TEXTURE_BUDGET_MB set "VICTORY_TEXTURE_BUDGET_MB=1150"
-if not defined VICTORY_TILES_DROP set "VICTORY_TILES_DROP=2"
-if not defined VICTORY_TILES_DROP_MIN set "VICTORY_TILES_DROP_MIN=512"
+if not defined VICTORY_LEVELS_MIN_KB set "VICTORY_LEVELS_MIN_KB=128"
+if not defined VICTORY_TEXTURE_BUDGET_MB set "VICTORY_TEXTURE_BUDGET_MB=1250"
+if not defined VICTORY_TEXTURE_MAX_DIM set "VICTORY_TEXTURE_MAX_DIM=256"
+if not defined VICTORY_TILES_DROP set "VICTORY_TILES_DROP=0"
 if not defined VICTORY_TILES_TAIL_ALWAYS set "VICTORY_TILES_TAIL_ALWAYS=1"
 if not defined VICTORY_TEXTURE_DROP set "VICTORY_TEXTURE_DROP=0"
 if not defined VICTORY_CARD_ROOM_FOR_TARGETS_MB set "VICTORY_CARD_ROOM_FOR_TARGETS_MB=900"
@@ -32,21 +32,26 @@ if not defined VICTORY_CARD_BUFFERS_MIN_MB set "VICTORY_CARD_BUFFERS_MIN_MB=1"
 if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=384"
 if not defined VICTORY_CARD_WINDOWS_MB set "VICTORY_CARD_WINDOWS_MB=0"
 
-rem 2. Shader optimizations + safe NVIDIA pipeline library
+rem 2. Turing/NVIDIA shader & descriptor optimizations (Early-Z, Wave32 tickets, raw-view clamp, safe pipeline library)
 if not defined VICTORY_SHADER_OPT set "VICTORY_SHADER_OPT=63"
+if not defined VICTORY_EARLY_DEPTH set "VICTORY_EARLY_DEPTH=1"
+if not defined VICTORY_THREAD_TICKET set "VICTORY_THREAD_TICKET=1"
+if not defined VICTORY_RAW_VIEW_CLAMP set "VICTORY_RAW_VIEW_CLAMP=1"
 if not defined VICTORY_LIBRARY_LOCK set "VICTORY_LIBRARY_LOCK=1"
 if not defined VICTORY_LIBRARY_MAP set "VICTORY_LIBRARY_MAP=0"
 if not defined VICTORY_VSYNC set "VICTORY_VSYNC=1"
 
-rem 3. No hardware Ray Tracing: zero-VRAM No-RT path + 16x faster dithered ambient GI + clean indoor fog cap
+rem 3. No hardware Ray Tracing: zero-VRAM No-RT + diffuse GI + specular reflections stand-in + clean indoor fog cap
 if not defined VICTORY_RT_NO_ARENAS set "VICTORY_RT_NO_ARENAS=1"
 if not defined VICTORY_MEMORY_CARD_MB set "VICTORY_MEMORY_CARD_MB=0"
-if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=0.75"
+if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=0.90"
+if not defined VICTORY_AMBIENT_SPECULAR set "VICTORY_AMBIENT_SPECULAR=1"
 if not defined VICTORY_AMBIENT_FAST set "VICTORY_AMBIENT_FAST=1"
-if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.015"
-if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.45"
+if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.035"
+if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.2"
 
-rem 4. Texture streaming & CPU command-list pipeline
+rem 4. Texture streaming & 6-core CPU command-list pipeline
+if not defined VICTORY_HELPER_PRIORITY set "VICTORY_HELPER_PRIORITY=1"
 if not defined VICTORY_THIN set "VICTORY_THIN=1"
 if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=8"
 if not defined VICTORY_TEXTURE_NO_WAIT set "VICTORY_TEXTURE_NO_WAIT=1"
@@ -63,11 +68,11 @@ if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
 if not defined VICTORY_CARD_AWAKE set "VICTORY_CARD_AWAKE=1"
 if not defined VICTORY_SHOW_AFTER set "VICTORY_SHOW_AFTER=1"
 
-rem 5. Built-in Series S FSR + NaN-safe RCAS GPU compute upscaler (720p target)
-if not defined VICTORY_FSR_SCALE set "VICTORY_FSR_SCALE=1.7"
-if not defined VICTORY_FSR_SHARPEN set "VICTORY_FSR_SHARPEN=0.50"
+rem 5. Built-in Series S FSR + NaN-safe RCAS GPU compute upscaler (540p -> 720p/1080p)
+if not defined VICTORY_FSR_SCALE set "VICTORY_FSR_SCALE=2.0"
+if not defined VICTORY_FSR_SHARPEN set "VICTORY_FSR_SHARPEN=0.55"
 
-if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn"
+if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn,victory_gpu::performance=info,victory_gpu::ambient=info"
 
 "%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-s --execute
 exit /b %errorlevel%

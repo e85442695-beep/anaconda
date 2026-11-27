@@ -1265,14 +1265,28 @@ pub(crate) fn read_from(layout: &victory_formats::texture::Layout, first: u32) -
     if layout.bytes_from(first) < layout.size { first } else { 0 }
 }
 
-/// Minimum mip levels to drop from large title-filled 2D textures on 4 GB VRAM
-/// GPUs (`VICTORY_TEXTURE_DROP=1..=3`, `VICTORY_TEXTURE_DROP_MIN=512`).
-/// Integrates directly with `base_level` / `held_only` so dropped top mips are
-/// never allocated on the GPU, never detiled, and never uploaded.
+/// Minimum mip levels to drop from large title-filled 2D placed textures on
+/// low-VRAM GPUs (`VICTORY_TEXTURE_DROP=1..=3`, `VICTORY_TEXTURE_DROP_MIN=512`,
+/// and/or `VICTORY_TEXTURE_MAX_DIM=256`). Integrates directly with `base_level`
+/// so dropped top mips are never allocated on the GPU, never detiled, and never
+/// uploaded.
+#[cfg(any(windows, test))]
+fn drop_floor_for(width: u64, height: u32, levels: u32, least: u64, max_dim_cap: u64) -> u32 {
+    let max_dim = width.max(u64::from(height));
+    let by_drop = if levels > 0 && max_dim >= least { levels } else { 0 };
+    let mut by_cap = 0u32;
+    if max_dim_cap > 0 && max_dim > max_dim_cap {
+        while (max_dim >> by_cap) > max_dim_cap && by_cap < 8 {
+            by_cap += 1;
+        }
+    }
+    by_drop.max(by_cap)
+}
+
 #[cfg(windows)]
 fn drop_floor(desc: &ResourceDesc) -> u32 {
-    static CFG: std::sync::OnceLock<(u32, u64)> = std::sync::OnceLock::new();
-    let &(levels, least) = CFG.get_or_init(|| {
+    static CFG: std::sync::OnceLock<(u32, u64, u64)> = std::sync::OnceLock::new();
+    let &(levels, least, max_dim_cap) = CFG.get_or_init(|| {
         let levels = std::env::var("VICTORY_TEXTURE_DROP")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
@@ -1282,16 +1296,22 @@ fn drop_floor(desc: &ResourceDesc) -> u32 {
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .unwrap_or(512);
-        if levels > 0 {
-            tracing::warn!(levels, least, "texture mip-drop active (VICTORY_TEXTURE_DROP)");
+        let max_dim_cap = std::env::var("VICTORY_TEXTURE_MAX_DIM")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .map_or(0, |v| v.clamp(128, 8192));
+        if levels > 0 || max_dim_cap > 0 {
+            tracing::warn!(
+                levels,
+                least,
+                max_dim_cap,
+                "placed texture mip-drop/cap active (VICTORY_TEXTURE_DROP / VICTORY_TEXTURE_MAX_DIM)"
+            );
         }
-        (levels, least)
+        (levels, least, max_dim_cap)
     });
-    if levels == 0 || desc.width.max(u64::from(desc.height)) < least {
-        0
-    } else {
-        levels
-    }
+    drop_floor_for(desc.width, desc.height, levels, least, max_dim_cap)
 }
 
 /// The level a host copy begins at for views that start at `first`: one the
@@ -1605,17 +1625,22 @@ fn hosted(this: This, make: bool) -> Option<Made> {
                 texture = reserved;
             }
         }
-        // The levels views show ([`held_only`]), plus any configured mip drop
-        // floor (`VICTORY_TEXTURE_DROP`) — strictly for placed textures so
-        // committed render/bake atlases keep their exact subresource layout.
+        // The levels views show ([`held_only`]), plus any configured mip drop/cap
+        // (`VICTORY_TEXTURE_DROP` / `VICTORY_TEXTURE_MAX_DIM`) — strictly for
+        // non-tiled placed textures so committed render/bake atlases keep their
+        // exact subresource layout and tiled textures stay full-chain.
         let mut base = 0;
-        if shape_fits && r.host.placed.load(Relaxed) && held_only() && alias_of(this).is_none() {
-            let wanted = r.host.wanted.load(Relaxed);
-            let viewed = crate::descriptor::host::first_viewed(r.data() as u64).unwrap_or(u32::MAX);
-            let first = wanted.min(viewed);
+        if texture.is_none() && shape_fits && r.host.placed.load(Relaxed) && alias_of(this).is_none() {
             let floor = drop_floor(&r.desc);
-            if first != u32::MAX {
-                base = base_level(&r.desc, first.max(floor));
+            if held_only() {
+                let wanted = r.host.wanted.load(Relaxed);
+                let viewed = crate::descriptor::host::first_viewed(r.data() as u64).unwrap_or(u32::MAX);
+                let first = wanted.min(viewed);
+                if first != u32::MAX {
+                    base = base_level(&r.desc, first.max(floor));
+                } else if floor > 0 {
+                    base = base_level(&r.desc, floor);
+                }
             } else if floor > 0 {
                 base = base_level(&r.desc, floor);
             }
@@ -1736,6 +1761,30 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
                 < budget / 100 * room_percent()
         }
         None => filled < WITHOUT_BUDGET,
+    }
+}
+
+/// Small emergency cushion (+192 MiB) when `!room` and `VICTORY_TILES_TAIL_ALWAYS=1`
+/// so tiny/tail-only placed textures still upload instead of rendering pitch black.
+#[cfg(windows)]
+pub(crate) fn room_emergency(memory: Option<[u64; 4]>) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !crate::tiles::tail_always() {
+        return false;
+    }
+    const CUSHION: u64 = 192 << 20;
+    let filled = KINDS[1].load(Relaxed) + crate::tiles::given_total();
+    static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let limit = *LIMIT.get_or_init(|| {
+        let mb = std::env::var("VICTORY_TEXTURE_BUDGET_MB").ok()?;
+        mb.trim().parse::<u64>().ok().map(|mb| mb << 20)
+    });
+    if let Some(limit) = limit {
+        return filled < limit.saturating_add(CUSHION);
+    }
+    match memory {
+        Some([budget, used, ..]) => used < budget.saturating_add(CUSHION),
+        None => true,
     }
 }
 
@@ -2976,19 +3025,21 @@ static PLACED_TEXTURES: std::sync::Mutex<std::collections::BTreeMap<(u64, [u32; 
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// The placed textures asked for with filler words set, as asked
-/// (address and description): for [`PLACED_TWINS`].
-#[cfg(windows)]
+/// (address and description): for [`PLACED_TWINS`]. Diagnostics builds only
+/// (VIctory-NVIDIA 5b36758): avoids a second mutex and O(n) scan per lookup
+/// in release builds.
+#[cfg(all(windows, feature = "diagnostics"))]
 static PLACED_RAW: std::sync::Mutex<std::collections::BTreeSet<(u64, [u32; 14])>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
 /// Placed textures asked for a second time with other filler words in
 /// their description: each was a second resource and host copy before the
 /// filler was left out of the key ([`texture_at`]).
-#[cfg(windows)]
+#[cfg(all(windows, feature = "diagnostics"))]
 static PLACED_TWINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// See [`PLACED_TWINS`].
-#[cfg(windows)]
+#[cfg(all(windows, feature = "diagnostics"))]
 pub(crate) fn placed_filler_twins() -> u64 {
     PLACED_TWINS.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -3069,6 +3120,7 @@ pub(crate) fn texture_at(address: u64, desc: &[u32; 14]) -> Option<This> {
     // that fills at world entry. They are not part of what a texture is.
     // `VICTORY_PLACED_FILLER=1`: kept in the key, as before.
     static KEPT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    #[cfg(feature = "diagnostics")]
     let raw = *desc;
     let mut key = *desc;
     if !*KEPT.get_or_init(|| std::env::var_os("VICTORY_PLACED_FILLER").is_some_and(|v| v == "1")) {
@@ -3079,6 +3131,7 @@ pub(crate) fn texture_at(address: u64, desc: &[u32; 14]) -> Option<This> {
     let mut map = PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
     // How many resources the filler alone would have added (a count for
     // the log: `placed_filler_twins`).
+    #[cfg(feature = "diagnostics")]
     if raw != key {
         let mut seen = PLACED_RAW.lock().unwrap_or_else(|e| e.into_inner());
         if seen.insert((address, raw)) {
@@ -4611,5 +4664,17 @@ float4 lit() : SV_Target { return 1.0; }
         let d = unsafe { more.texture.GetDesc() };
         assert_eq!((more.base, d.Width, d.MipLevels), (0, 256, 9));
         assert!(more.serial != copy.serial && more.grown.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn drop_floor_respects_max_dim_cap_and_drop_levels() {
+        assert_eq!(drop_floor_for(4096, 4096, 0, 512, 256), 4);
+        assert_eq!(drop_floor_for(2048, 2048, 0, 512, 256), 3);
+        assert_eq!(drop_floor_for(1024, 512, 0, 512, 256), 2);
+        assert_eq!(drop_floor_for(512, 512, 0, 512, 256), 1);
+        assert_eq!(drop_floor_for(256, 256, 0, 512, 256), 0);
+        assert_eq!(drop_floor_for(128, 128, 0, 512, 256), 0);
+        assert_eq!(drop_floor_for(1024, 1024, 3, 512, 256), 3);
+        assert_eq!(drop_floor_for(1024, 1024, 0, 512, 0), 0);
     }
 }

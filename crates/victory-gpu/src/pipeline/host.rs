@@ -599,6 +599,7 @@ impl HostPipeline {
                 return None;
             }
         };
+        let _sampler_cache = super::library::with_static_samplers(!samplers.is_empty());
         let code = |i: usize| {
             stages.get(i).and_then(|(s, _)| s.translated()).map_or(
                 D3D12_SHADER_BYTECODE::default(),

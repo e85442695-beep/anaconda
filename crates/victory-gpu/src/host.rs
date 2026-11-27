@@ -732,7 +732,7 @@ fn card_clock_watch(clock: &'static CardClock) {
 
 /// For the frame-rate line: [`CARD_CLOCK_US`] per frame, `ms` being the
 /// frame's time.
-fn card_clock_line(frames: f64, ms: f64) {
+fn card_clock_line(frames: f64, ms: f64) -> f64 {
     let [idle, behind, stood] = [0, 1, 2].map(|i| CARD_CLOCK_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames);
     tracing::info!(
         "the card's clock per frame: nothing of ours queued {idle:.1} ms (the card about {:.0}% busy by this count), \
@@ -740,6 +740,7 @@ fn card_clock_line(frames: f64, ms: f64) {
          had not submitted; the submitting thread stood waiting for the card {stood:.1} ms",
         if ms > 0.0 { (100.0 * (1.0 - idle / ms)).clamp(0.0, 100.0) } else { 0.0 }
     );
+    idle
 }
 
 /// Of the preparing: title memory copies (microseconds, bytes) and texture
@@ -8689,11 +8690,76 @@ struct Presenter {
     panel: panel::Panel,
 }
 
+/// A low-cost performance sample for release builds. The command queue's
+/// busy estimate and the CPU's fence waits measure different things.
+#[derive(Default)]
+struct PerformanceWindow {
+    elapsed_ms: f64,
+    frames: u32,
+    draws: u64,
+    dropped: u64,
+    cpu_prepare_ms: f64,
+    copy_prepare_ms: f64,
+    texture_prepare_ms: f64,
+    gpu_wait_ms: f64,
+    queue_idle_ms: f64,
+    readback_ms: f64,
+}
+
+impl PerformanceWindow {
+    fn record(&mut self, sample: Self) {
+        if !tracing::enabled!(target: "victory_gpu::performance", tracing::Level::INFO) {
+            return;
+        }
+
+        self.elapsed_ms += sample.elapsed_ms;
+        self.frames += sample.frames;
+        self.draws += sample.draws;
+        self.dropped += sample.dropped;
+        self.cpu_prepare_ms += sample.cpu_prepare_ms;
+        self.copy_prepare_ms += sample.copy_prepare_ms;
+        self.texture_prepare_ms += sample.texture_prepare_ms;
+        self.gpu_wait_ms += sample.gpu_wait_ms;
+        self.queue_idle_ms += sample.queue_idle_ms;
+        self.readback_ms += sample.readback_ms;
+        if self.elapsed_ms < 10_000.0 {
+            return;
+        }
+
+        let frames = f64::from(self.frames);
+        let queue_busy_ms = (self.elapsed_ms - self.queue_idle_ms).max(0.0);
+        let video_memory = HOST.get().and_then(Option::as_ref).and_then(Host::video_memory);
+        let mib = |index: usize| video_memory.map(|memory| memory[index] >> 20);
+        tracing::info!(
+            target: "victory_gpu::performance",
+            seconds = format_args!("{:.2}", self.elapsed_ms / 1000.0),
+            frames = self.frames,
+            fps = format_args!("{:.2}", frames * 1000.0 / self.elapsed_ms),
+            frame_ms = format_args!("{:.1}", self.elapsed_ms / frames),
+            draws_per_frame = format_args!("{:.0}", self.draws as f64 / frames),
+            dropped_per_frame = format_args!("{:.1}", self.dropped as f64 / frames),
+            cpu_prepare_ms = format_args!("{:.1}", self.cpu_prepare_ms / frames),
+            copy_prepare_ms = format_args!("{:.1}", self.copy_prepare_ms / frames),
+            texture_prepare_ms = format_args!("{:.1}", self.texture_prepare_ms / frames),
+            gpu_wait_ms = format_args!("{:.1}", self.gpu_wait_ms / frames),
+            gpu_queue_busy_est_ms = format_args!("{:.1}", queue_busy_ms / frames),
+            readback_ms = format_args!("{:.1}", self.readback_ms / frames),
+            local_used_mib = ?mib(1),
+            local_budget_mib = ?mib(0),
+            shared_used_mib = ?mib(3),
+            shared_budget_mib = ?mib(2),
+            "render performance window"
+        );
+        *self = Self::default();
+    }
+}
+
 /// The frame rate, shown in the window's caption every second and logged
 /// every few seconds.
 struct Meter {
     since: std::time::Instant,
     frames: u32,
+    performance: PerformanceWindow,
     #[cfg(feature = "diagnostics")]
     copy_stats_frames: u64,
     drawn: u64,
@@ -8708,6 +8774,7 @@ impl Meter {
         Meter {
             since: now,
             frames: 0,
+            performance: PerformanceWindow::default(),
             #[cfg(feature = "diagnostics")]
             copy_stats_frames: 0,
             drawn: crate::draw::drawn(),
@@ -8738,10 +8805,12 @@ impl Meter {
             return;
         }
         let drawn = crate::draw::drawn();
-        let frames = f64::from(self.frames);
+        let presented = self.frames;
+        let frames = f64::from(presented);
         let fps = frames / elapsed.as_secs_f64();
         let ms = elapsed.as_secs_f64() * 1000.0 / frames;
-        let draws = (drawn - self.drawn) as f64 / frames;
+        let draw_count = drawn - self.drawn;
+        let draws = draw_count as f64 / frames;
         (self.since, self.frames, self.drawn) = (std::time::Instant::now(), 0, drawn);
         // Of a frame, ms preparing submissions and ms waiting for the GPU.
         let [cpu, gpu] = [0, 1].map(|i| {
@@ -8754,7 +8823,8 @@ impl Meter {
         let [back_ms, back_mb] = [0, 1].map(|i| {
             COPY_BACK[i].swap(0, Ordering::Relaxed) as f64 / [1e3, 1e6][i] / frames
         });
-        let dropped = crate::draw::take_dropped() as f64 / frames;
+        let dropped_count = crate::draw::take_dropped();
+        let dropped = dropped_count as f64 / frames;
         let indirect = crate::list::take_indirect() as f64 / frames;
         let mesh_largest = MESH_GROUPS[0].swap(0, Ordering::Relaxed);
         let mesh_groups = MESH_GROUPS[1].swap(0, Ordering::Relaxed) as f64 / frames;
@@ -8767,7 +8837,19 @@ impl Meter {
         crate::descriptor::sync_line(frames);
         late_line(frames);
         crate::queue::behind_line(frames);
-        card_clock_line(frames, ms);
+        let queue_idle = card_clock_line(frames, ms);
+        self.performance.record(PerformanceWindow {
+            elapsed_ms: elapsed.as_secs_f64() * 1000.0,
+            frames: presented,
+            draws: draw_count,
+            dropped: dropped_count,
+            cpu_prepare_ms: cpu * frames,
+            copy_prepare_ms: copy_ms * frames,
+            texture_prepare_ms: texture_ms * frames,
+            gpu_wait_ms: gpu * frames,
+            queue_idle_ms: queue_idle * frames,
+            readback_ms: back_ms * frames,
+        });
         #[cfg(feature = "diagnostics")]
         spans::line(frames);
         crate::shadow::back_line(frames);
@@ -9824,6 +9906,13 @@ extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    #[cfg(feature = "diagnostics")]
+    if message == WM_KEYDOWN
+        && wparam.0 == usize::from(windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_F9)
+        && lparam.0 & (1 << 30) == 0
+    {
+        crate::capture::request_frame();
+    }
     // SAFETY: the default handling for our window.
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }

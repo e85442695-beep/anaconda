@@ -120,31 +120,54 @@ pub(crate) fn floor() -> u64 {
     *BYTES.get_or_init(|| parse_floor(std::env::var("VICTORY_LEVELS_MIN_KB").ok().as_deref()))
 }
 
-/// Optional top-mip drop for large tiled 2D textures (`VICTORY_TILES_DROP=1..=3`,
-/// `VICTORY_TILES_DROP_MIN=512`). Because tiled resources keep their full mip
-/// chain and `show_from()` points views at the first mapped mip, skipping top
-/// mips saves 75-87% VRAM and CPU detiling without any subresource mismatch.
-fn trim_held_levels_for(held: u32, levels: u32, max_dim: u32, drop: u32, min_dim: u32) -> u32 {
-    if drop == 0 || held == 0 || levels <= 1 || max_dim < min_dim {
+/// Optional top-mip drop (`VICTORY_TILES_DROP=1..=3`, `VICTORY_TILES_DROP_MIN=512`)
+/// and maximum-dimension cap (`VICTORY_TEXTURE_MAX_DIM=256`) for tiled 2D textures.
+/// Because tiled resources keep their full mip chain and `show_from()` points views
+/// at the first mapped mip, skipping top mips saves 75-95% VRAM and CPU detiling
+/// without any subresource mismatch.
+fn trim_held_levels_for(
+    held: u32,
+    levels: u32,
+    max_dim: u32,
+    drop: u32,
+    min_dim: u32,
+    max_dim_cap: u32,
+) -> u32 {
+    if held == 0 || levels <= 1 {
         return held;
     }
     let mut trimmed = held;
-    for level in 0..drop.min(levels.saturating_sub(1)).min(31) {
-        let dim = max_dim >> level;
-        if dim < min_dim {
-            break;
+    let max_level = levels.saturating_sub(1).min(31);
+    if drop > 0 && max_dim >= min_dim {
+        for level in 0..drop.min(max_level) {
+            let dim = max_dim >> level;
+            if dim < min_dim {
+                break;
+            }
+            let next = trimmed & !(1u32 << level);
+            if next == 0 {
+                break;
+            }
+            trimmed = next;
         }
-        let next = trimmed & !(1u32 << level);
-        if next == 0 {
-            break;
+    }
+    if max_dim_cap > 0 && max_dim > max_dim_cap {
+        for level in 0..max_level {
+            if (max_dim >> level) <= max_dim_cap {
+                break;
+            }
+            let next = trimmed & !(1u32 << level);
+            if next == 0 {
+                break;
+            }
+            trimmed = next;
         }
-        trimmed = next;
     }
     trimmed
 }
 
-fn drop_config() -> (u32, u32) {
-    static CFG: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+fn drop_config() -> (u32, u32, u32) {
+    static CFG: std::sync::OnceLock<(u32, u32, u32)> = std::sync::OnceLock::new();
     *CFG.get_or_init(|| {
         let drop = std::env::var("VICTORY_TILES_DROP")
             .ok()
@@ -156,27 +179,37 @@ fn drop_config() -> (u32, u32) {
             .and_then(|v| v.trim().parse::<u32>().ok())
             .unwrap_or(512)
             .max(128);
-        if drop > 0 {
-            tracing::warn!(drop, min_dim, "tiled top-mip drop active (VICTORY_TILES_DROP)");
+        let max_dim_cap = std::env::var("VICTORY_TEXTURE_MAX_DIM")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .map_or(0, |v| v.clamp(128, 8192));
+        if drop > 0 || max_dim_cap > 0 {
+            tracing::warn!(
+                drop,
+                min_dim,
+                max_dim_cap,
+                "tiled top-mip drop/cap active (VICTORY_TILES_DROP / VICTORY_TEXTURE_MAX_DIM)"
+            );
         }
-        (drop, min_dim)
+        (drop, min_dim, max_dim_cap)
     })
 }
 
 pub(crate) fn wants_drop(max_dim: u32) -> bool {
-    let (drop, min_dim) = drop_config();
-    drop > 0 && max_dim >= min_dim
+    let (drop, min_dim, max_dim_cap) = drop_config();
+    (drop > 0 && max_dim >= min_dim) || (max_dim_cap > 0 && max_dim > max_dim_cap)
 }
 
 pub(crate) fn trim_held_levels(held: u32, levels: u32, max_dim: u32) -> u32 {
-    let (drop, min_dim) = drop_config();
-    trim_held_levels_for(held, levels, max_dim, drop, min_dim)
+    let (drop, min_dim, max_dim_cap) = drop_config();
+    trim_held_levels_for(held, levels, max_dim, drop, min_dim, max_dim_cap)
 }
 
 /// When `VICTORY_TILES_TAIL_ALWAYS=1`, allow mapping the tiny packed mip tail
 /// (<= 2 tiles = 128 KiB) even when VRAM is tight so character/world textures
 /// never render solid black.
-fn tail_always() -> bool {
+pub(crate) fn tail_always() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_TILES_TAIL_ALWAYS").is_some_and(|v| v == "1"))
 }
@@ -1660,15 +1693,21 @@ void look() {
     fn trim_held_levels_drops_only_large_top_mips_and_never_empties() {
         // 2048x2048 with 12 mips: drop=2 with min_dim=512 drops mips 0 (2048) and 1 (1024), keeps 2 (512)..11
         let all12 = (1u32 << 12) - 1;
-        assert_eq!(trim_held_levels_for(all12, 12, 2048, 2, 512), all12 & !0b11);
+        assert_eq!(trim_held_levels_for(all12, 12, 2048, 2, 512, 0), all12 & !0b11);
         // 512x512 with min_dim=512 and drop=2 drops mip 0 (512) and stops at mip 1 (256 < 512)
-        assert_eq!(trim_held_levels_for(0b111111, 10, 512, 2, 512), 0b111110);
+        assert_eq!(trim_held_levels_for(0b111111, 10, 512, 2, 512, 0), 0b111110);
         // 256x256 is below min_dim=512: untouched
-        assert_eq!(trim_held_levels_for(0b11111, 9, 256, 2, 512), 0b11111);
+        assert_eq!(trim_held_levels_for(0b11111, 9, 256, 2, 512, 0), 0b11111);
         // Never drops the only held mip (prevents black texture)
-        assert_eq!(trim_held_levels_for(0b1, 10, 2048, 2, 512), 0b1);
-        assert_eq!(trim_held_levels_for(0b10, 10, 2048, 2, 512), 0b10);
-        // Disabled when drop=0
-        assert_eq!(trim_held_levels_for(all12, 12, 2048, 0, 512), all12);
+        assert_eq!(trim_held_levels_for(0b1, 10, 2048, 2, 512, 256), 0b1);
+        assert_eq!(trim_held_levels_for(0b10, 10, 2048, 2, 512, 256), 0b10);
+        // Disabled when drop=0 and max_dim_cap=0
+        assert_eq!(trim_held_levels_for(all12, 12, 2048, 0, 512, 0), all12);
+        // max_dim_cap=256 caps 4096 (drops 0..4), 2048 (drops 0..3), 1024 (drops 0..2), 512 (drops 0), leaves 256 untouched
+        assert_eq!(trim_held_levels_for((1u32 << 13) - 1, 13, 4096, 0, 512, 256), ((1u32 << 13) - 1) & !0b1111);
+        assert_eq!(trim_held_levels_for(all12, 12, 2048, 0, 512, 256), all12 & !0b111);
+        assert_eq!(trim_held_levels_for((1u32 << 11) - 1, 11, 1024, 0, 512, 256), ((1u32 << 11) - 1) & !0b11);
+        assert_eq!(trim_held_levels_for(0b111111, 10, 512, 0, 512, 256), 0b111110);
+        assert_eq!(trim_held_levels_for(0b11111, 9, 256, 0, 512, 256), 0b11111);
     }
 }

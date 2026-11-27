@@ -92,6 +92,42 @@ fn ask(what: &str, from: u32) {
     }
 }
 
+/// Whether helper threads that the submitting thread waits for run at its
+/// above-normal priority (`VICTORY_HELPER_PRIORITY`, on unless `0`).
+/// On 6-core CPUs (e.g. Ryzen 5 5500, i5-12400F), prevents helper pools from
+/// starving behind title/list threads while the GPU sits idle.
+fn helpers_raised() -> bool {
+    crate::toggled!("VICTORY_HELPER_PRIORITY")
+}
+
+/// A helper thread's priority ([`helpers_raised`]). [`Self::keep`] checks the
+/// toggle before each work unit and updates OS priority only on change.
+pub(crate) struct Priority {
+    applied: Option<bool>,
+}
+
+impl Priority {
+    pub(crate) fn new() -> Self {
+        let mut priority = Self { applied: None };
+        priority.keep();
+        priority
+    }
+
+    pub(crate) fn keep(&mut self) {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_NORMAL,
+        };
+        let on = helpers_raised();
+        if self.applied == Some(on) {
+            return;
+        }
+        let priority = if on { THREAD_PRIORITY_ABOVE_NORMAL } else { THREAD_PRIORITY_NORMAL };
+        // SAFETY: our own thread.
+        unsafe { SetThreadPriority(GetCurrentThread(), priority) };
+        self.applied = Some(on);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

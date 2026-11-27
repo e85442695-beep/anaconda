@@ -228,13 +228,13 @@ unsafe impl Send for NullRt {}
 
 static NULL_RT: Mutex<Option<NullRt>> = Mutex::new(None);
 
-fn no_rt_arenas() -> bool {
+pub(crate) fn no_rt_arenas() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_RT_NO_ARENAS").is_some_and(|v| v == "1"))
         && !crate::pipeline::builder_runs()
 }
 
-fn ready_null_rt(list: &HostList, heap: &HostHeap) -> Option<Ready> {
+pub(crate) fn ready_null_rt(list: &HostList, heap: &HostHeap) -> Option<Ready> {
     let mut guard = NULL_RT.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         let host = host()?;
@@ -979,9 +979,6 @@ pub(crate) fn ready(
     use_: Use,
     threads: Option<[u32; 3]>,
 ) -> Option<Ready> {
-    if use_ == Use::Reads && no_rt_arenas() {
-        return ready_null_rt(list, heap);
-    }
     let mut guard = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Memory::new();

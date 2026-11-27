@@ -459,9 +459,9 @@ pub(crate) struct State {
     /// Tables made afresh in this list: (table, slot count, contents) → first
     /// dynamic slot.
     fresh_tables: std::collections::HashMap<(u64, u32, u64), FreshTable, std::hash::BuildHasherDefault<crate::host::AddressHash>>,
-    /// The dynamic slots the list holds: title heap, first, count; given
-    /// back when the list has run, is reset or released.
-    dynamic: Vec<(usize, u32, u32)>,
+    /// The dynamic slots the list holds: title heap, host heap id, first,
+    /// count; given back when the list has run, is reset or released.
+    dynamic: Vec<(usize, u64, u32, u32)>,
     /// Root SRVs bound as one-view tables in this list: (title heap, title
     /// address; 0 for none) → dynamic slot, and the host copy the slot
     /// shows: later draws of the list bring that one up to date, whatever
@@ -478,8 +478,8 @@ pub(crate) struct State {
 
 impl Drop for State {
     fn drop(&mut self) {
-        for &(heap, first, n) in &self.dynamic {
-            crate::descriptor::release_dynamic(heap, first, n);
+        for &(heap, id, first, n) in &self.dynamic {
+            crate::descriptor::release_dynamic(heap, id, first, n);
         }
     }
 }
@@ -500,8 +500,8 @@ impl State {
             static ONCE: std::sync::Once = std::sync::Once::new();
             ONCE.call_once(|| tracing::warn!("a list ran again after its descriptor tables were given back"));
         }
-        for (heap, first, n) in self.dynamic.drain(..) {
-            crate::descriptor::release_dynamic(heap, first, n);
+        for (heap, id, first, n) in self.dynamic.drain(..) {
+            crate::descriptor::release_dynamic(heap, id, first, n);
         }
         self.fresh_tables.clear();
         self.recording = 0;
@@ -775,6 +775,24 @@ pub(crate) static HEAP_TEXTURES_REUPLOADED_FULL: AtomicU64 = AtomicU64::new(0);
 fn full_card_pass() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_FULL_CARD_PASS").is_none_or(|v| v != "0"))
+}
+
+/// Convert the retry interval to frames using the time between frames.
+/// Extra texture passes in the same frame do not advance this clock.
+fn texture_retry_frames(frame: u64, now: u64) -> u64 {
+    static CLOCK: std::sync::Mutex<Option<(u64, u64, u64)>> = std::sync::Mutex::new(None);
+    let mut clock = CLOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((last_frame, last_ms, retry)) = *clock else {
+        *clock = Some((frame, now, 16));
+        return 16;
+    };
+    if frame <= last_frame {
+        return retry;
+    }
+    let elapsed = now.saturating_sub(last_ms).max(1);
+    let retry = (4_000 * (frame - last_frame) / elapsed).clamp(1, 256);
+    *clock = Some((frame, now, retry));
+    retry
 }
 
 /// Whether a texture that has its host copy is still brought up to date
@@ -1421,6 +1439,9 @@ impl State {
             0 => None,
             h => crate::descriptor::heap(h as This).host(),
         }?;
+        if use_ == crate::memory::Use::Reads && crate::memory::no_rt_arenas() {
+            return crate::memory::ready_null_rt(list, heap);
+        }
         let (mut addresses, mut constants) = (Vec::new(), Vec::new());
         // (What it may write: its root views of unordered access.)
         let written: Vec<u64> = t
@@ -1938,7 +1959,7 @@ impl State {
                 }) else {
                     return false;
                 };
-                self.dynamic.push((key.0, index, 1));
+                self.dynamic.push((key.0, host.id(), index, 1));
                 if let Some((a, s)) = &shadow {
                     // SAFETY: a live buffer.
                     let base = unsafe { s.buffer.GetGPUVirtualAddress() };
@@ -2012,7 +2033,7 @@ impl State {
                 }) else {
                     return false;
                 };
-                self.dynamic.push((key.0, index, 1));
+                self.dynamic.push((key.0, host.id(), index, 1));
                 self.root_srv_slots
                     .insert(key, (index, shadow.as_ref().map(|(_, s)| s.clone())));
                 match &shadow {
@@ -2610,16 +2631,13 @@ impl State {
         // (`VICTORY_CARD_ACCOUNTING=1`; a line when the card first has no
         // room, and every five seconds after it).
         Self::card_accounting(heap, host, frame, room);
-        // The frames in about four seconds, between 16 and 256: how long a
+        // The frames in about four seconds: how long a
         // slot with nothing to upload waits at most for its next look. In
         // frames alone it was 120: four minutes at the opening cutscene's
         // half a frame per second, while the title streams by the clock.
         // (About a second before the runtime told of the memory it maps:
         // the looks are now only for what that does not tell.)
-        static PASSED: AtomicU64 = AtomicU64::new(0);
-        let now = crate::host::now_ms();
-        let took = now.saturating_sub(PASSED.swap(now, Ordering::Relaxed)).max(1);
-        let most = (4000 / took).clamp(16, 256);
+        let most = texture_retry_frames(frame, crate::host::now_ms());
         // What a table entry of a texture a shader samples says.
         let sampled = UsedResource {
             kind: ResourceType::Srv,
@@ -2794,7 +2812,17 @@ impl State {
             if !room {
                 let has_its_texture = reupload_when_full()
                     && heap.handle(index).is_some_and(|handle| host.texture_slot_made_from(index, handle));
-                if !has_its_texture {
+                // With `VICTORY_TILES_TAIL_ALWAYS=1`, still allow placed 2D
+                // textures through under a small emergency cushion (+192 MiB)
+                // so tiled textures map their <= 128 KiB mip tail and capped
+                // room/character textures never stay pitch black (0,0,0).
+                let allow_tail = !has_its_texture
+                    && crate::resource::room_emergency(memory)
+                    && matches!(
+                        heap.handle(index).and_then(crate::descriptor::view),
+                        Some(View::Placed(false, resource, _)) if resource[0] == 3
+                    );
+                if !has_its_texture && !allow_tail {
                     refused += 1;
                     if full_card_pass() {
                         // Held back for the frames of about four seconds
@@ -2809,13 +2837,15 @@ impl State {
                     }
                     continue;
                 }
-                let n = HEAP_TEXTURES_REUPLOADED_FULL.fetch_add(1, Ordering::Relaxed) + 1;
-                if n == 1 || n.is_multiple_of(500) {
-                    tracing::info!(
-                        so_far = n,
-                        slot = index,
-                        "a texture already on the card is brought up to date although the card has no room for new ones"
-                    );
+                if has_its_texture {
+                    let n = HEAP_TEXTURES_REUPLOADED_FULL.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n == 1 || n.is_multiple_of(500) {
+                        tracing::info!(
+                            so_far = n,
+                            slot = index,
+                            "a texture already on the card is brought up to date although the card has no room for new ones"
+                        );
+                    }
                 }
             }
             // Gate new host texture creation / staging on commit reserve after
@@ -3177,13 +3207,38 @@ impl State {
         }
     }
 
-    /// The stand-in for the indirect light after a dispatch of `p`
-    /// (`crate::ambient`). Whether it recorded anything.
+    /// The stand-in for the indirect light and reflections after a dispatch of
+    /// `p` (`crate::ambient`). Whether it recorded anything.
     fn ambient(&self, list: &HostList, p: &HostPipeline, role: crate::ambient::Role) -> bool {
-        use crate::ambient::{AIR, DEPTH, LIGHT, RADIANCE, Role, Views};
+        use crate::ambient::{
+            AIR, DEPTH, LIGHT, MISS_ALPHA, MISS_DEPTH, MISS_LIGHT, MISS_OPAQUE, MissNote, RADIANCE, Role, Views,
+        };
         let Some(t) = p.stages.first().map(|s| s.translated()) else {
             return false;
         };
+        // Which surfaces the miss program's rays are of (its first root
+        // constant): leave water (and by default alpha) reflections untouched.
+        let layer = match role {
+            Role::Miss => t
+                .used
+                .iter()
+                .find(|u| u.root == RootType::Constants)
+                .and_then(|u| match self.roots_ref(true).get(usize::from(u.slot)) {
+                    Some(Root::Constants(c)) => c.first().copied(),
+                    _ => None,
+                })
+                .unwrap_or(u32::MAX),
+            _ => 0,
+        };
+        if role == Role::Miss {
+            static ALPHA_TOO: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let alpha_too =
+                *ALPHA_TOO.get_or_init(|| std::env::var("VICTORY_AMBIENT_SPECULAR_ALPHA").is_ok_and(|v| v.trim() == "1"));
+            if !(layer == MISS_OPAQUE || (alpha_too && layer == MISS_ALPHA)) {
+                crate::ambient::note_miss(MissNote::Water);
+                return false;
+            }
+        }
         let Some(heap) = (self.heaps[0] != 0).then(|| crate::descriptor::heap(self.heaps[0] as This).host()).flatten()
         else {
             return false;
@@ -3195,8 +3250,17 @@ impl State {
             let Some(Root::Table(table)) = self.roots_ref(true).get(usize::from(slot)) else {
                 return None;
             };
-            let resource = match crate::descriptor::view(table + u64::from(offset) * 4)? {
-                View::Shader(r, _) | View::Unordered(r, ..) => r,
+            let view = crate::descriptor::view(table + u64::from(offset) * 4)?;
+            let view = crate::descriptor::host::placed_texture(&view).unwrap_or(view);
+            let resource = match (kind, view) {
+                (ResourceType::Srv, View::Shader(r, desc)) => {
+                    if desc.is_some_and(|d| matches!(crate::resource::pc_format(d[0]), 22 | 47)
+                        || (d[1] == 4 && d[6] != 0)) {
+                        return None;
+                    }
+                    r
+                }
+                (ResourceType::Uav, View::Unordered(r, ..)) => r,
                 _ => return None,
             };
             let start = match self.ambient_tables.iter().find(|m| m.0 == slot) {
@@ -3212,29 +3276,92 @@ impl State {
             Role::Resolve => LIGHT,
             Role::Radiance => RADIANCE,
             Role::Air => AIR,
+            Role::Miss => MISS_LIGHT,
         };
-        let image = entry(ResourceType::Uav, at);
-        let depth = match role {
-            Role::Resolve => entry(ResourceType::Srv, DEPTH),
-            Role::Radiance | Role::Air => image,
+        let image = match role {
+            Role::Miss => entry(ResourceType::Uav, at).or_else(|| {
+                t.used
+                    .iter()
+                    .filter(|u| u.kind == ResourceType::Uav && u.root == RootType::Table)
+                    .filter_map(|u| entry(ResourceType::Uav, (u.slot, u.table_offset_dwords)))
+                    .find(|(d, _)| d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.Format.0 == 26)
+            }),
+            _ => entry(ResourceType::Uav, at),
         };
-        let (Some((of, image)), Some((seen, depth))) = (image, depth) else {
-            once!(?role, "no stand-in for the indirect light: other tables");
+        let Some((of, image)) = image else {
+            once!(?role, "no stand-in for the indirect light: missing image UAV");
+            if role == Role::Miss {
+                crate::ambient::note_miss(MissNote::NotReady);
+            }
             return false;
+        };
+        let (depth, depth_size) = match role {
+            Role::Resolve => {
+                let fits = |(d, _): &(D3D12_RESOURCE_DESC, D3D12_GPU_DESCRIPTOR_HANDLE)| {
+                    d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D
+                        && matches!(d.Format.0, 19 | 20 | 39 | 40 | 41 | 44 | 45)
+                        && (d.Width, d.Height) == (of.Width, of.Height)
+                };
+                let found = entry(ResourceType::Srv, DEPTH).filter(fits).or_else(|| {
+                    t.used
+                        .iter()
+                        .filter(|u| u.kind == ResourceType::Srv && u.root == RootType::Table)
+                        .filter_map(|u| entry(ResourceType::Srv, (u.slot, u.table_offset_dwords)))
+                        .find(|candidate| {
+                            fits(candidate) && candidate.0.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0 != 0
+                        })
+                });
+                let Some((seen, depth)) = found else {
+                    once!(?role, "no stand-in for the indirect light: missing matching depth SRV");
+                    return false;
+                };
+                (Some(depth), [seen.Width as u32, seen.Height])
+            }
+            Role::Miss => {
+                // Full-size 32-bit depth matching 2x the half-res reflection buffer.
+                let fits = |(d, _): &(D3D12_RESOURCE_DESC, D3D12_GPU_DESCRIPTOR_HANDLE)| {
+                    d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D
+                        && matches!(d.Format.0, 19 | 20 | 39 | 40 | 41)
+                        && d.Width.abs_diff(of.Width * 2) <= 1
+                        && u64::from(d.Height).abs_diff(u64::from(of.Height) * 2) <= 1
+                };
+                let found = entry(ResourceType::Srv, MISS_DEPTH).filter(fits).or_else(|| {
+                    t.used
+                        .iter()
+                        .filter(|u| u.kind == ResourceType::Srv && u.root == RootType::Table)
+                        .filter_map(|u| entry(ResourceType::Srv, (u.slot, u.table_offset_dwords)))
+                        .find(fits)
+                });
+                let Some((seen, depth)) = found else {
+                    once!(?role, "no stand-in for reflections: missing matching full-res depth SRV");
+                    crate::ambient::note_miss(MissNote::NotReady);
+                    return false;
+                };
+                (Some(depth), [seen.Width as u32, seen.Height])
+            }
+            Role::Radiance | Role::Air => (None, [of.Width as u32, of.Height]),
         };
         // (R32_UINT holding R9G9B9E5; R11G11B10_FLOAT.)
         let format = if role == Role::Resolve { 42 } else { 26 };
         let volume = of.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-        if of.Format.0 != format || (seen.Width, seen.Height) != (of.Width, of.Height) || volume != (role == Role::Air) {
+        if of.Format.0 != format || volume != (role == Role::Air) {
             once!(?role, format = of.Format.0, "no stand-in for the indirect light: another image");
+            if role == Role::Miss {
+                crate::ambient::note_miss(MissNote::NotReady);
+            }
             return false;
         }
-        crate::ambient::after(list, role, &Views {
+        let ran = crate::ambient::after(list, role, &Views {
             image,
             depth,
             size: [of.Width as u32, of.Height],
             slices: u32::from(of.DepthOrArraySize),
-        })
+            depth_size,
+        });
+        if ran && role == Role::Miss {
+            crate::ambient::note_miss(MissNote::Ran(layer));
+        }
+        ran
     }
 
     /// What a draw or dispatch runs, for the device-removed report
@@ -3781,7 +3908,7 @@ impl State {
             };
             self.fresh_tables.insert(key, FreshTable { first, epoch: 0, ready: Vec::new() });
             self.dynamic
-                .push((std::ptr::from_ref(heap) as usize, first, n));
+                .push((std::ptr::from_ref(heap) as usize, host.id(), first, n));
             // The title's own slots of this table: what the draw reads of
             // them it brings up to date here, in the dynamic slots.
             let title_first = heap.index(table).filter(|first| first + n <= host.count());
@@ -4388,6 +4515,13 @@ impl State {
         }
         if kind == DISPATCH {
             self.buffers_written();
+            if let Some(role @ crate::ambient::Role::Miss) = p.stages.first().and_then(|s| s.shader.ambient)
+                && crate::ambient::on()
+                && self.ambient(list, p, role)
+            {
+                self.host_pipeline = 0;
+                self.host_roots[1] = 0;
+            }
         } else {
             self.drew(Some(p));
         }

@@ -250,12 +250,14 @@ impl Pool {
     }
 
     fn help(&self) {
+        let mut priority = crate::cores::Priority::new();
         let mut state = self.state();
         loop {
             let Some((work, i)) = take(&mut state) else {
                 state = self.more.wait(state).unwrap_or_else(|e| e.into_inner());
                 continue;
             };
+            priority.keep();
             state.running += 1;
             drop(state);
             let working = crate::timeline::span("a landing's job");

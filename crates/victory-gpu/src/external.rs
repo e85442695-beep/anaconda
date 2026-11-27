@@ -57,10 +57,35 @@ Texture2D<float4> src : register(t0);
 RWTexture2D<float4> dst : register(u0);
 SamplerState samp : register(s0);
 
-// Sanitize HDR (R16G16B16A16_FLOAT) texels so NaN/Inf from dropped/buggy
-// shaders never spread black 3x3 blocks through the 5-tap RCAS filter.
-float3 safe_hdr(float3 v) {
-    return (any(isnan(v)) || any(isinf(v))) ? float3(0.0, 0.0, 0.0) : clamp(v, 0.0, 65504.0);
+// Treat invalid components independently so an overflow in one channel cannot
+// wipe out the colour in the other two. Keep finite scene values above 1 for
+// the game's subsequent exposure and tone mapping passes.
+float3 safe_hdr(float3 value, float3 fallback) {
+    return isfinite(value) ? clamp(value, 0.0, 65504.0) : fallback;
+}
+
+// Bilinear sampling may already have propagated one invalid texel into the
+// sample. Reconstruct the affected channels from the finite taps, keeping
+// the original weights. This path is only needed on invalid centre samples.
+float3 recover_center(float2 uv) {
+    int2 last = int2(round(uv_scale / inv_src)) - 1;
+    float2 at = uv / inv_src - 0.5;
+    int2 base = int2(floor(at));
+    float2 weight = frac(at);
+    float3 sum = 0.0;
+    float3 total = 0.0;
+    [unroll] for (uint y = 0; y < 2; ++y) {
+        [unroll] for (uint x = 0; x < 2; ++x) {
+            int2 pos = clamp(base + int2(x, y), int2(0, 0), last);
+            float3 value = src.Load(int3(pos, 0)).rgb;
+            float w = (x == 0 ? 1.0 - weight.x : weight.x)
+                    * (y == 0 ? 1.0 - weight.y : weight.y);
+            float3 valid_weight = isfinite(value) ? w.xxx : float3(0.0, 0.0, 0.0);
+            sum += safe_hdr(value, 0.0) * valid_weight;
+            total += valid_weight;
+        }
+    }
+    return sum / max(total, 1e-6);
 }
 
 // Fast FSR-inspired 5-tap RCAS contrast-adaptive sharpening + NaN guard
@@ -74,13 +99,15 @@ void main(uint3 id : SV_DispatchThreadID) {
     uv = clamp(uv, min_uv, max_uv);
 
     float4 c = src.SampleLevel(samp, uv, 0.0);
-    c.rgb = safe_hdr(c.rgb);
-    c.a = (isnan(c.a) || isinf(c.a)) ? 1.0 : saturate(c.a);
+    float3 fallback = 0.0;
+    [branch] if (!all(isfinite(c.rgb))) fallback = recover_center(uv);
+    c.rgb = safe_hdr(c.rgb, fallback);
+    c.a = isfinite(c.a) ? saturate(c.a) : 1.0;
     if (sharpness > 0.001) {
-        float3 n = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(0.0, -inv_src.y), min_uv, max_uv), 0.0).rgb);
-        float3 s = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(0.0,  inv_src.y), min_uv, max_uv), 0.0).rgb);
-        float3 w = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(-inv_src.x, 0.0), min_uv, max_uv), 0.0).rgb);
-        float3 e = safe_hdr(src.SampleLevel(samp, clamp(uv + float2( inv_src.x, 0.0), min_uv, max_uv), 0.0).rgb);
+        float3 n = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(0.0, -inv_src.y), min_uv, max_uv), 0.0).rgb, c.rgb);
+        float3 s = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(0.0,  inv_src.y), min_uv, max_uv), 0.0).rgb, c.rgb);
+        float3 w = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(-inv_src.x, 0.0), min_uv, max_uv), 0.0).rgb, c.rgb);
+        float3 e = safe_hdr(src.SampleLevel(samp, clamp(uv + float2( inv_src.x, 0.0), min_uv, max_uv), 0.0).rgb, c.rgb);
         float3 mn = min(c.rgb, min(min(n, s), min(w, e)));
         float3 mx = max(c.rgb, max(max(n, s), max(w, e)));
         float3 avg = (n + s + w + e) * 0.25;
@@ -161,6 +188,53 @@ impl BuiltinUpscaler {
                 step,
                 next: AtomicU32::new(0),
             })
+        }
+    }
+
+    fn record(
+        &self,
+        device: &ID3D12Device,
+        cmd: &ID3D12GraphicsCommandList,
+        (src, src_format): (&ID3D12Resource, DXGI_FORMAT),
+        (out, out_format): (&ID3D12Resource, DXGI_FORMAT),
+        params: &[u32; 8],
+    ) {
+        let slot = self.next.fetch_add(1, Ordering::Relaxed) % UPSCALE_SLOTS;
+        // SAFETY: an open list and live textures in their shader access states.
+        unsafe {
+            let mut cpu_srv = self.heap.GetCPUDescriptorHandleForHeapStart();
+            cpu_srv.ptr += (slot * 2 * self.step) as usize;
+            let cpu_uav = D3D12_CPU_DESCRIPTOR_HANDLE {
+                ptr: cpu_srv.ptr + self.step as usize,
+            };
+            let mut gpu_base = self.heap.GetGPUDescriptorHandleForHeapStart();
+            gpu_base.ptr += u64::from(slot * 2 * self.step);
+            let srv = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                Format: src_format,
+                ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Texture2D: D3D12_TEX2D_SRV {
+                        MipLevels: 1,
+                        ..Default::default()
+                    },
+                },
+            };
+            let uav = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                Format: out_format,
+                ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                    Texture2D: D3D12_TEX2D_UAV::default(),
+                },
+            };
+            device.CreateShaderResourceView(src, Some(&srv), cpu_srv);
+            device.CreateUnorderedAccessView(out, None, Some(&uav), cpu_uav);
+            cmd.SetPipelineState(&self.pso);
+            cmd.SetComputeRootSignature(&self.root);
+            cmd.SetDescriptorHeaps(&[Some(self.heap.clone())]);
+            cmd.SetComputeRoot32BitConstants(0, 8, params.as_ptr().cast(), 0);
+            cmd.SetComputeRootDescriptorTable(1, gpu_base);
+            cmd.Dispatch(params[2].div_ceil(8), params[3].div_ceil(8), 1);
         }
     }
 }
@@ -290,79 +364,45 @@ pub(crate) fn upscale_builtin_now(
     crate::list::ensure_state(host_list, color, src_wanted);
     crate::list::ensure_state(host_list, output, UAV);
 
-    let slot = up.next.fetch_add(1, Ordering::Relaxed) % UPSCALE_SLOTS;
-    // SAFETY: descriptor heap and live resources; recording on open list.
-    crate::list::with_state(list, |hlist, state| unsafe {
-        let mut cpu_srv = up.heap.GetCPUDescriptorHandleForHeapStart();
-        cpu_srv.ptr += (slot * 2 * up.step) as usize;
-        let cpu_uav = D3D12_CPU_DESCRIPTOR_HANDLE {
-            ptr: cpu_srv.ptr + up.step as usize,
-        };
-        let mut gpu_base = up.heap.GetGPUDescriptorHandleForHeapStart();
-        gpu_base.ptr += u64::from(slot * 2 * up.step);
-
-        let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
-            Format: view_format(src_desc.Format),
-            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
-            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
-                Texture2D: D3D12_TEX2D_SRV {
-                    MostDetailedMip: 0,
-                    MipLevels: 1,
-                    PlaneSlice: 0,
-                    ResourceMinLODClamp: 0.0,
-                },
-            },
-        };
-        let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
-            Format: view_format(out_desc.Format),
-            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
-            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
-                Texture2D: D3D12_TEX2D_UAV {
-                    MipSlice: 0,
-                    PlaneSlice: 0,
-                },
-            },
-        };
-        host.device.CreateShaderResourceView(color_tex, Some(&srv_desc), cpu_srv);
-        host.device.CreateUnorderedAccessView(out_tex, None, Some(&uav_desc), cpu_uav);
-
-        static SHARPEN: OnceLock<f32> = OnceLock::new();
-        let sharpness = *SHARPEN.get_or_init(|| {
-            std::env::var("VICTORY_FSR_SHARPEN")
-                .ok()
-                .and_then(|v| v.trim().parse::<f32>().ok())
-                .unwrap_or(0.45)
-                .clamp(0.0, 1.0)
-        });
-        let params: [u32; 8] = [
-            (ren_w as f32 / src_w as f32).to_bits(),
-            (ren_h as f32 / src_h as f32).to_bits(),
-            out_w,
-            out_h,
-            (1.0f32 / src_w as f32).to_bits(),
-            (1.0f32 / src_h as f32).to_bits(),
-            sharpness.to_bits(),
-            0,
-        ];
+    static SHARPEN: OnceLock<f32> = OnceLock::new();
+    let sharpness = *SHARPEN.get_or_init(|| {
+        std::env::var("VICTORY_FSR_SHARPEN")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(0.45)
+            .clamp(0.0, 1.0)
+    });
+    let params = [
+        (ren_w as f32 / src_w as f32).to_bits(),
+        (ren_h as f32 / src_h as f32).to_bits(),
+        out_w,
+        out_h,
+        (1.0f32 / src_w as f32).to_bits(),
+        (1.0f32 / src_h as f32).to_bits(),
+        sharpness.to_bits(),
+        0,
+    ];
+    crate::list::with_state(list, |hlist, state| {
         let cmd = &hlist.list;
-        cmd.SetPipelineState(&up.pso);
-        cmd.SetComputeRootSignature(&up.root);
-        cmd.SetDescriptorHeaps(&[Some(up.heap.clone())]);
-        cmd.SetComputeRoot32BitConstants(0, 8, params.as_ptr().cast(), 0);
-        cmd.SetComputeRootDescriptorTable(1, gpu_base);
-        cmd.Dispatch(out_w.div_ceil(8), out_h.div_ceil(8), 1);
-
-        let uav_barrier = D3D12_RESOURCE_BARRIER {
-            Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
-            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-            Anonymous: D3D12_RESOURCE_BARRIER_0 {
-                UAV: std::mem::ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
-                    pResource: std::mem::transmute_copy(out_tex),
-                }),
-            },
-        };
-        cmd.ResourceBarrier(&[uav_barrier]);
+        up.record(
+            &host.device,
+            cmd,
+            (color_tex, view_format(src_desc.Format)),
+            (out_tex, view_format(out_desc.Format)),
+            &params,
+        );
+        // SAFETY: an open list and a live UAV texture.
+        unsafe {
+            cmd.ResourceBarrier(&[D3D12_RESOURCE_BARRIER {
+                Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
+                Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                    UAV: std::mem::ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
+                        pResource: std::mem::transmute_copy(out_tex),
+                    }),
+                },
+            }]);
+        }
         state.host_state_lost();
     });
 
@@ -385,5 +425,137 @@ mod tests {
             return;
         };
         BuiltinUpscaler::new(&host.device).expect("built-in FSR+RCAS shader must compile");
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn builtin_upscaler_preserves_hdr_near_non_finite_texels() {
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        let up = BuiltinUpscaler::new(&host.device).unwrap();
+        let format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        let make_texture = |width, flags, state| {
+            let desc = D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+                Width: width,
+                Height: 1,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                Format: format,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Flags: flags,
+                ..Default::default()
+            };
+            let mut texture: Option<ID3D12Resource> = None;
+            // SAFETY: valid default heap and single-mip texture description.
+            unsafe {
+                host.device.CreateCommittedResource(
+                    &D3D12_HEAP_PROPERTIES {
+                        Type: D3D12_HEAP_TYPE_DEFAULT,
+                        ..Default::default()
+                    },
+                    D3D12_HEAP_FLAG_NONE,
+                    &desc,
+                    state,
+                    None,
+                    &mut texture,
+                )
+            }
+            .unwrap();
+            texture.unwrap()
+        };
+        let src = make_texture(2, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+        let out = make_texture(
+            4,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        );
+        let (upload, data) = host.upload_buffer(256).unwrap();
+        // Two FP16 texels: (NaN, 1/16, 4, NaN), then (1/8, 1/32, 2, 1).
+        let input = [
+            0x7e00u16, 0x2c00, 0x4400, 0x7e00, 0x3000, 0x2800, 0x4000, 0x3c00,
+        ];
+        let upload_location = D3D12_TEXTURE_COPY_LOCATION {
+            // SAFETY: the location borrows the live upload resource.
+            pResource: unsafe { std::mem::transmute_copy(&upload) },
+            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                    Offset: 0,
+                    Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                        Format: format,
+                        Width: 2,
+                        Height: 1,
+                        Depth: 1,
+                        RowPitch: 256,
+                    },
+                },
+            },
+        };
+        let src_location = D3D12_TEXTURE_COPY_LOCATION {
+            // SAFETY: the location borrows the live texture.
+            pResource: unsafe { std::mem::transmute_copy(&src) },
+            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                SubresourceIndex: 0,
+            },
+        };
+        let list = host.new_list().unwrap();
+        let cmd = &list.list;
+        // SAFETY: the mapped upload has room for both texels; the list is open.
+        unsafe {
+            std::ptr::copy_nonoverlapping(input.as_ptr().cast::<u8>(), data, size_of_val(&input));
+            cmd.CopyTextureRegion(&src_location, 0, 0, 0, &upload_location, None);
+            cmd.ResourceBarrier(&[crate::host::transition(
+                &src,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            )]);
+        }
+        let one = 1.0f32.to_bits();
+        let half = 0.5f32.to_bits();
+        up.record(
+            &host.device,
+            cmd,
+            (&src, format),
+            (&out, format),
+            &[one, one, 4, 1, half, one, half, 0],
+        );
+        // SAFETY: the shader dispatch ended on this list and the texture is live.
+        unsafe {
+            cmd.ResourceBarrier(&[crate::host::transition(
+                &out,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+            )]);
+        }
+        let (readback, footprint) = crate::capture::read_back(&host.device, cmd, &out).unwrap();
+        list.close();
+        host.execute(&[&list]);
+        let mut mapped = std::ptr::null_mut();
+        // SAFETY: execute waited and readback covers four FP16x4 texels.
+        let pixels = unsafe {
+            readback.Map(0, None, Some(&mut mapped)).unwrap();
+            let start = mapped.cast::<u8>().add(footprint.Offset as usize);
+            let pixels = start.cast::<[[u16; 4]; 4]>().read_unaligned();
+            readback.Unmap(0, None);
+            pixels
+        };
+        for &[r, g, b, a] in &pixels[1..3] {
+            assert_eq!(r, 0x3000, "recover red from the finite tap: {pixels:x?}");
+            assert!(
+                (0x2800..=0x2c00).contains(&g),
+                "preserve shadow detail: {pixels:x?}"
+            );
+            assert!(
+                (0x4000..=0x4400).contains(&b),
+                "preserve HDR highlights: {pixels:x?}"
+            );
+            assert_eq!(a, 0x3c00);
+        }
     }
 }

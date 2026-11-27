@@ -68,7 +68,7 @@
     <worldHeightShadowQuality value="0.000000" />
     <mapMSAA value="false" />
     <vrsEnabled value="false" />
-    <manualMipBias value="2.000000" />
+    <manualMipBias value="1.000000" />
   </advancedGraphics>
   <video>
     <versionMajor value="6" />
