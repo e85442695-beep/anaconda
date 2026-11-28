@@ -1573,6 +1573,14 @@ fn release_kept() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_KEEP_RELEASE").is_none_or(|v| v != "0"))
 }
 
+/// `VICTORY_KEEP_RELEASE=texture`: let go of host textures only. Buffers a
+/// slot views are read by commands in the air far more often, and letting
+/// one go too early removes the device; the textures are what grows VRAM.
+fn release_textures() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VICTORY_KEEP_RELEASE").as_deref() == Ok("texture"))
+}
+
 pub(crate) fn kept_dropped() -> u64 {
     KEPT_DROPPED.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
@@ -2908,15 +2916,28 @@ impl HostHeap {
                     }
                     *taken = false;
                     given += 1;
-                    if !release_kept() {
+                    let all = release_kept();
+                    let textures = release_textures();
+                    if !all && !textures {
                         continue;
                     }
                     let Some(kept) = self.kept.get(at as usize + offset) else {
                         continue;
                     };
-                    if let Some(held) = kept.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                        gone.push(held);
-                    }
+                    let held = {
+                        let mut slot = kept.lock().unwrap_or_else(|e| e.into_inner());
+                        let Some(held) = slot.take() else {
+                            continue;
+                        };
+                        // SAFETY: a live resource the slot held.
+                        let buffer = unsafe { held.GetDesc() }.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+                        if buffer && !all {
+                            *slot = Some(held);
+                            continue;
+                        }
+                        held
+                    };
+                    gone.push(held);
                 }
                 self.free.fetch_add(given, std::sync::atomic::Ordering::Relaxed);
                 self.too_long.store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
