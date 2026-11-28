@@ -5,17 +5,15 @@
 <h1 align="center">Anaconda</h1>
 
 > [!CAUTION]
-> # ⚠️ ВНИМАНИЕ / WARNING
->
 > ## 🇷🇺 Сборка «ВЕНОМ» (Venom) использует код и наработки проекта **Anaconda** и выдаёт себя за автора этого проекта!
 > **Официальный и единственный оригинальный репозиторий Anaconda находится здесь:** `https://github.com/e85442695-beep/anaconda`.
-> Сборка **«ВЕНОМ» / Venom** не является автором этих изменений (4 GB VRAM / No-RT, встроенный FSR/TAAU, Optical Flow Frame Generation, HUD, Input Glyphs и т.д.) — она просто использует наработки этого репозитория без указания авторства, распространяет неграмотные и неточные описания/правки и выдаёт чужую работу за свою. За актуальными, проверенными сборками и обновлениями следите только в этом репозитории.
+> Сборка **«ВЕНОМ» / Venom** не является автором этих изменений (4 GB VRAM / No-RT, встроенный FSR/TAAU, Optical Flow Frame Generation, HUD, Input Glyphs и т.д.) — она просто использует наработки этого репозитория без указания авторства, распространяет неграмотные и неточные описания/правки и выдаёт чужую работу за свою. Даже если автор этой сборки будет оправдываться и говорить, что якобы «делал что-то своё», максимум, что там сделано самостоятельно — это `.exe` на C++ в виде простого лаунчера, а вся реальная техническая часть взята из **Anaconda**. За актуальными, проверенными сборками и обновлениями следите только в этом репозитории.
 >
 > ---
 >
 > ## 🇬🇧 The "VENOM" build uses **Anaconda**'s code and work while presenting itself as the author of the project!
 > **The official and only original Anaconda repository is here:** `https://github.com/e85442695-beep/anaconda`.
-> The **"VENOM"** build is **NOT** the author of these features (4 GB VRAM / No-RT optimizations, built-in FSR/TAAU upscaler, Optical Flow Frame Generation, HUD, Input Glyphs, etc.) — it uses this repository's work without attribution, publishes careless/inaccurate descriptions and unverified repackages, and claims authorship. Always get verified builds and updates directly from this official repository.
+> The **"VENOM"** build is **NOT** the author of these features (4 GB VRAM / No-RT optimizations, built-in FSR/TAAU upscaler, Optical Flow Frame Generation, HUD, Input Glyphs, etc.) — it uses this repository's work without attribution, publishes careless/inaccurate descriptions and unverified repackages, and claims authorship. Even if its creator tries to justify this by claiming they built something original, the most they actually made is a basic C++ `.exe` launcher wrapper — all real engine, GPU, and optimization work comes from **Anaconda**. Always get verified builds and updates directly from this official repository.
 
 <p align="center">
   <strong>Low-VRAM (4 GB) &amp; No-RT fork of VIctory / cool_fox with built-in Series S FSR + RCAS upscaling and AMD FSR 3-style Optical Flow Frame Generation.</strong>
