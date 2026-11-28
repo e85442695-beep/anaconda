@@ -4,6 +4,19 @@
 
 <h1 align="center">Anaconda</h1>
 
+> [!CAUTION]
+> # ⚠️ ВНИМАНИЕ / WARNING
+>
+> ## 🇷🇺 Сборка «ВЕНОМ» (Venom) использует код и наработки проекта **Anaconda** и выдаёт себя за автора этого проекта!
+> **Официальный и единственный оригинальный репозиторий Anaconda находится здесь:** `https://github.com/e85442695-beep/anaconda`.
+> Сборка **«ВЕНОМ» / Venom** не является автором этих изменений (4 GB VRAM / No-RT, встроенный FSR/TAAU, Optical Flow Frame Generation, HUD, Input Glyphs и т.д.) — она просто использует наработки этого репозитория без указания авторства и представляет себя как автора проекта.
+>
+> ---
+>
+> ## 🇬🇧 The "VENOM" build uses **Anaconda**'s code and work while presenting itself as the author of the project!
+> **The official and only original Anaconda repository is here:** `https://github.com/e85442695-beep/anaconda`.
+> The **"VENOM"** build is **NOT** the author of these features (4 GB VRAM / No-RT optimizations, built-in FSR/TAAU upscaler, Optical Flow Frame Generation, HUD, Input Glyphs, etc.) — it uses this project's work and falsely claims authorship.
+
 <p align="center">
   <strong>Low-VRAM (4 GB) &amp; No-RT fork of VIctory / cool_fox with built-in Series S FSR + RCAS upscaling and AMD FSR 3-style Optical Flow Frame Generation.</strong>
 </p>
