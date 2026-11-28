@@ -430,14 +430,14 @@ fn card_all() -> bool {
 /// Shader-written (`BufferKind::Uav`) buffers and the huge (`>= 64 MiB`) main
 /// heap buffer receive the full `VICTORY_CARD_BUFFERS_MB` cap so they never
 /// spill to slow CPU snapshotting. Read-only (`BufferKind::Normal`) buffers
-/// under 64 MiB are capped at 25% of the cap so static/menu/vertex buffers
+/// under 64 MiB are capped at 12.5% of the cap so static/menu/vertex buffers
 /// never crowd out UAV buffers or waste VRAM on 4 GB cards.
 fn effective_card_limit(most: u64, size: u64, kind: BufferKind) -> u64 {
     const BIG_HEAP: u64 = 64 << 20;
     if kind == BufferKind::Uav || size >= BIG_HEAP {
         most
     } else {
-        most / 4
+        most / 8
     }
 }
 
@@ -5668,12 +5668,12 @@ mod window_tests {
     #[test]
     fn card_limit_prioritizes_uav_and_main_heap_over_normal_buffers() {
         use super::{BufferKind, effective_card_limit};
-        let cap = 700u64 << 20;
+        let cap = 704u64 << 20;
         assert_eq!(effective_card_limit(cap, 64 << 10, BufferKind::Uav), cap);
         assert_eq!(effective_card_limit(cap, 2 << 20, BufferKind::Uav), cap);
         assert_eq!(effective_card_limit(cap, 174 << 20, BufferKind::Normal), cap);
-        assert_eq!(effective_card_limit(cap, 16 << 20, BufferKind::Normal), cap / 4);
-        assert_eq!(effective_card_limit(cap, 256 << 10, BufferKind::Normal), cap / 4);
+        assert_eq!(effective_card_limit(cap, 16 << 20, BufferKind::Normal), cap / 8);
+        assert_eq!(effective_card_limit(cap, 256 << 10, BufferKind::Normal), cap / 8);
     }
 }
 
