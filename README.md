@@ -9,11 +9,15 @@
 > **Официальный и единственный оригинальный репозиторий Anaconda находится здесь:** `https://github.com/e85442695-beep/anaconda`.
 > Сборка **«ВЕНОМ» / Venom** не является автором этих изменений (4 GB VRAM / No-RT, встроенный FSR/TAAU, Optical Flow Frame Generation, HUD, Input Glyphs и т.д.) — она просто использует наработки этого репозитория без указания авторства, распространяет неграмотные и неточные описания/правки и выдаёт чужую работу за свою. Даже если автор этой сборки будет оправдываться и говорить, что якобы «делал что-то своё», максимум, что там сделано самостоятельно — это `.exe` на C++ в виде простого лаунчера, а вся реальная техническая часть взята из **Anaconda**. За актуальными, проверенными сборками и обновлениями следите только в этом репозитории.
 >
+> **Важно про графику:** «ВЕНОМ» настроен под мощные ПК, поэтому если вы запускаете **Anaconda** по умолчанию — не удивляйтесь урезанной графике: **Anaconda изначально рассчитана под слабые видеокарты (4 GB VRAM, без аппаратного RT) и низкие настройки графики.**
+>
 > ---
 >
 > ## 🇬🇧 The "VENOM" build uses **Anaconda**'s code and work while presenting itself as the author of the project!
 > **The official and only original Anaconda repository is here:** `https://github.com/e85442695-beep/anaconda`.
 > The **"VENOM"** build is **NOT** the author of these features (4 GB VRAM / No-RT optimizations, built-in FSR/TAAU upscaler, Optical Flow Frame Generation, HUD, Input Glyphs, etc.) — it uses this repository's work without attribution, publishes careless/inaccurate descriptions and unverified repackages, and claims authorship. Even if its creator tries to justify this by claiming they built something original, the most they actually made is a basic C++ `.exe` launcher wrapper — all real engine, GPU, and optimization work comes from **Anaconda**. Always get verified builds and updates directly from this official repository.
+>
+> **Note on graphics presets:** "VENOM" is configured for high-end PCs, so if you run **Anaconda** with its default profile, don't be surprised by lower graphics — **Anaconda is specifically tuned for low-end / 4 GB VRAM GPUs (No-RT) and low graphics settings.**
 
 <p align="center">
   <strong>Low-VRAM (4 GB) &amp; No-RT fork of VIctory / cool_fox with built-in Series S FSR + RCAS upscaling and AMD FSR 3-style Optical Flow Frame Generation.</strong>
