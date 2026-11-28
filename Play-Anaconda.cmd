@@ -20,7 +20,7 @@ if not defined VICTORY_DATA_DIR set "VICTORY_DATA_DIR=%LOCALAPPDATA%\Anaconda\da
 
 rem 1. Strict <= 4 GB VRAM budget (eliminates WDDM PCIe paging & reserves room for world RTs + card buffers)
 if not defined VICTORY_DISPLAY_MODE set "VICTORY_DISPLAY_MODE=1280x720"
-if not defined VICTORY_VRAM_MB set "VICTORY_VRAM_MB=3050"
+if not defined VICTORY_VRAM_MB set "VICTORY_VRAM_MB=2800"
 if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
 if not defined VICTORY_LEVELS_MIN_KB set "VICTORY_LEVELS_MIN_KB=128"
 if not defined VICTORY_TILES_HEAP_MB set "VICTORY_TILES_HEAP_MB=16"
