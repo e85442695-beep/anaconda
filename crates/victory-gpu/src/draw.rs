@@ -2813,14 +2813,21 @@ impl State {
                 let has_its_texture = reupload_when_full()
                     && heap.handle(index).is_some_and(|handle| host.texture_slot_made_from(index, handle));
                 // With `VICTORY_TILES_TAIL_ALWAYS=1`, still allow placed 2D
-                // textures through under a small emergency cushion (+192 MiB)
-                // so tiled textures map their <= 128 KiB mip tail and capped
-                // room/character textures never stay pitch black (0,0,0).
+                // textures through under an emergency cushion (+256 MiB, DXGI
+                // < 96%), OR — even when DXGI is tight — allow tiled placed 2D
+                // textures whenever the tile pool already has paid-for free
+                // tiles (>= 1 MiB, costing 0 bytes of new VRAM) so their
+                // minimal mip tail maps instead of staying `null_view` black.
                 let allow_tail = !has_its_texture
-                    && crate::resource::room_emergency(memory)
                     && matches!(
                         heap.handle(index).and_then(crate::descriptor::view),
                         Some(View::Placed(false, resource, _)) if resource[0] == 3
+                            && (crate::resource::room_emergency(memory)
+                                || (crate::tiles::wanted()
+                                    && crate::tiles::tail_always()
+                                    && crate::tiles::free_pool_bytes() >= (1 << 20)
+                                    && crate::resource::placed_bytes(&resource)
+                                        .is_some_and(|b| b >= crate::tiles::floor())))
                     );
                 if !has_its_texture && !allow_tail {
                     refused += 1;

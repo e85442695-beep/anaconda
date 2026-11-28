@@ -1565,18 +1565,28 @@ pub(crate) const DYNAMIC: u32 = 1 << 18;
 /// sets the most). 2^18 ran out in the title's bigger places (session
 /// play-1125-0127: 27,000 to 35,000 tables a frame, up to 3,285 of them
 /// refused, with 2,639 indirect draws and dispatches).
+fn dynamic_slots_for(count: u32, null: u32, most: Option<u32>) -> u32 {
+    const SAFE_TITLE_SLOTS: u32 = 720_000;
+    const MIN_TITLE_SLOTS: u32 = 680_000;
+    if null < PORTABLE_VIEWS {
+        let default_portable = null.saturating_sub(SAFE_TITLE_SLOTS).max(DYNAMIC);
+        return match most {
+            Some(requested) => requested.clamp(DYNAMIC, null.saturating_sub(MIN_TITLE_SLOTS).max(DYNAMIC)),
+            None => default_portable,
+        };
+    }
+    let most = most.unwrap_or(DYNAMIC << 2);
+    null.saturating_sub(count).min(most).max(DYNAMIC)
+}
+
 fn dynamic_slots(count: u32, null: u32) -> u32 {
-    static MOST: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    static MOST: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     let most = *MOST.get_or_init(|| {
         std::env::var("VICTORY_DYNAMIC_SLOTS")
             .ok()
             .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(DYNAMIC << 2)
     });
-    if null < PORTABLE_VIEWS {
-        return DYNAMIC;
-    }
-    null.saturating_sub(count).min(most).max(DYNAMIC)
+    dynamic_slots_for(count, null, most)
 }
 
 impl HostHeap {
@@ -6064,5 +6074,17 @@ mod bake_flip_tests {
         assert_eq!(cb1(), None);
         drop(cb2);
         assert!(take_pending_list_flip(id2).is_none(), "dropping uncalled closure cleans up entry");
+    }
+
+    #[test]
+    fn dynamic_slots_for_portable_heap_keeps_title_slots_safe() {
+        let null = PORTABLE_VIEWS - 1; // 999_999 (NVIDIA)
+        // Default expands safely from 262_144 to 279_999 while keeping 720_000 title slots.
+        assert_eq!(dynamic_slots_for(1_245_184, null, None), null - 720_000);
+        // Explicit override clamps safely below 680_000 title slots.
+        assert_eq!(dynamic_slots_for(1_245_184, null, Some(300_000)), 300_000);
+        assert_eq!(dynamic_slots_for(1_245_184, null, Some(500_000)), null - 680_000);
+        // Uncapped heap preserves up to DYNAMIC << 2.
+        assert_eq!(dynamic_slots_for(1_245_184, UNCAPPED_VIEWS - 1, None), (UNCAPPED_VIEWS - 1) - 1_245_184);
     }
 }

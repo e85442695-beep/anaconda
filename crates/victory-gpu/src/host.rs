@@ -9809,7 +9809,7 @@ impl Host {
                 meter: Meter::new(),
                 composer: None,
                 framegen: None,
-                fps_hud: crate::fps_hud::FpsHud::new(self),
+                fps_hud: crate::fps_hud::FpsHud::new(),
                 input_glyphs: crate::input_glyphs::InputGlyphsHud::new(),
                 #[cfg(feature = "diagnostics")]
                 panel: panel::Panel::new(),
@@ -9866,11 +9866,6 @@ pub(crate) fn legal_for(flags: u32, state: u32) -> u32 {
 }
 
 impl Host {
-    /// The adapter the device runs on, for the on-screen hardware panel.
-    pub(crate) fn adapter(&self) -> Option<&IDXGIAdapter3> {
-        self.adapter.as_ref()
-    }
-
     /// The card's memory as the system accounts it to this process, in
     /// bytes: the budget and the use of the card's own memory, then of the
     /// PC's memory shared with the card (where the system moves what does
@@ -9933,6 +9928,20 @@ impl Host {
             [m.Budget, m.CurrentUsage, m.AvailableForReservation, m.CurrentReservation]
         };
         Some([all(&own), all(&shared)])
+    }
+
+    /// Adapter display name and dedicated VRAM size in bytes, from DXGI.
+    pub(crate) fn adapter_info(&self) -> Option<(String, u64)> {
+        let adapter = self.adapter.as_ref()?;
+        // SAFETY: plain DXGI query on a live adapter.
+        let desc = unsafe { adapter.GetDesc1() }.ok()?;
+        let end = desc
+            .Description
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(desc.Description.len());
+        let name = String::from_utf16_lossy(&desc.Description[..end]);
+        Some((name, desc.DedicatedVideoMemory as u64))
     }
 
     /// Logs [`Self::video_memory_groups`], with `when` it is said.

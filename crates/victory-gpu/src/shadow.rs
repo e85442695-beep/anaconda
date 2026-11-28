@@ -425,12 +425,23 @@ fn card_all() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_ALL").is_some_and(|v| v == "1"))
 }
 
-/// [`card_for`] in the card's own memory.
+/// Effective card-buffer VRAM cap for a title buffer of `size` bytes and `kind`.
 ///
-/// Prioritizes UAV-flagged buffers and large (`>= 1 MiB`) buffers up to the
-/// full `VICTORY_CARD_BUFFERS_MB` cap, while limiting small (`< 1 MiB`)
-/// non-UAV buffers to the first half of the cap so read-only menu/static
-/// buffers never crowd out shader-written world buffers into CPU snapshotting.
+/// Shader-written (`BufferKind::Uav`) buffers and the huge (`>= 64 MiB`) main
+/// heap buffer receive the full `VICTORY_CARD_BUFFERS_MB` cap so they never
+/// spill to slow CPU snapshotting. Read-only (`BufferKind::Normal`) buffers
+/// under 64 MiB are capped at 25% of the cap so static/menu/vertex buffers
+/// never crowd out UAV buffers or waste VRAM on 4 GB cards.
+fn effective_card_limit(most: u64, size: u64, kind: BufferKind) -> u64 {
+    const BIG_HEAP: u64 = 64 << 20;
+    if kind == BufferKind::Uav || size >= BIG_HEAP {
+        most
+    } else {
+        most / 4
+    }
+}
+
+/// [`card_for`] in the card's own memory.
 fn card_room_for(size: u64, kind: BufferKind) -> Option<ID3D12Resource> {
     if !cards() {
         return None;
@@ -439,12 +450,8 @@ fn card_room_for(size: u64, kind: BufferKind) -> Option<ID3D12Resource> {
     if size < least || size >= 1 << 30 {
         return None;
     }
-    const ONE_MIB: u64 = 1 << 20;
-    let effective_most = if kind == BufferKind::Uav || size >= ONE_MIB {
-        most
-    } else {
-        most / 2
-    };
+    const BIG_HEAP: u64 = 64 << 20;
+    let effective_most = effective_card_limit(most, size, kind);
     let host = host()?;
     if !host.card_ready() {
         return None;
@@ -485,7 +492,7 @@ fn card_room_for(size: u64, kind: BufferKind) -> Option<ID3D12Resource> {
     }
     if CARD_BYTES[0].fetch_add(size, Ordering::Relaxed) + size > effective_most {
         CARD_BYTES[0].fetch_sub(size, Ordering::Relaxed);
-        if kind == BufferKind::Uav || size >= ONE_MIB {
+        if kind == BufferKind::Uav || size >= BIG_HEAP {
             let n = CARD_CAP_REFUSED[0].fetch_add(1, Ordering::Relaxed) + 1;
             let bytes = CARD_CAP_REFUSED[1].fetch_add(size, Ordering::Relaxed) + size;
             if n <= 4 || n.is_multiple_of(32) {
@@ -5656,6 +5663,17 @@ mod window_tests {
             assert!(start <= address && start + len >= end);
             assert!(start % g == 0 && len % g == 0);
         }
+    }
+
+    #[test]
+    fn card_limit_prioritizes_uav_and_main_heap_over_normal_buffers() {
+        use super::{BufferKind, effective_card_limit};
+        let cap = 700u64 << 20;
+        assert_eq!(effective_card_limit(cap, 64 << 10, BufferKind::Uav), cap);
+        assert_eq!(effective_card_limit(cap, 2 << 20, BufferKind::Uav), cap);
+        assert_eq!(effective_card_limit(cap, 174 << 20, BufferKind::Normal), cap);
+        assert_eq!(effective_card_limit(cap, 16 << 20, BufferKind::Normal), cap / 4);
+        assert_eq!(effective_card_limit(cap, 256 << 10, BufferKind::Normal), cap / 4);
     }
 }
 

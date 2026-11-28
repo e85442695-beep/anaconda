@@ -1305,17 +1305,18 @@ fn drop_floor(desc: &ResourceDesc) -> u32 {
             tracing::warn!(
                 levels,
                 least,
-                max_dim_cap = if held_only() { max_dim_cap } else { 0 },
+                max_dim_cap,
                 "placed texture mip-drop/cap active (VICTORY_TEXTURE_DROP / VICTORY_TEXTURE_MAX_DIM)"
             );
         }
         (levels, least, max_dim_cap)
     });
-    // When `VICTORY_LEVELS_ON_DEMAND=1` (`!held_only()`), `VICTORY_TEXTURE_MAX_DIM`
-    // is applied safely by `crate::tiles` (full mip chain, zero subresource shift);
-    // only an explicit `VICTORY_TEXTURE_DROP` shifts `base` on non-tiled copies.
-    let cap = if held_only() { max_dim_cap } else { 0 };
-    drop_floor_for(desc.width, desc.height, levels, least, cap)
+    // Tiled resources (`texture.is_some()` in `hosted`) apply `VICTORY_TEXTURE_MAX_DIM`
+    // in `crate::tiles` and never reach `drop_floor`. Non-tiled fallback placed 2D
+    // textures (`texture.is_none() && shape_fits && placed && alias_of.is_none()`)
+    // also honor `max_dim_cap` here so they do not allocate full 1K-4K chains in
+    // `pool_mib` when `VICTORY_LEVELS_ON_DEMAND=1`.
+    drop_floor_for(desc.width, desc.height, levels, least, max_dim_cap)
 }
 
 /// The level a host copy begins at for views that start at `first`: one the
@@ -1782,6 +1783,41 @@ fn room_allows(
     }
 }
 
+/// Optional upper cap on title-filled texture bytes (`VICTORY_TEXTURE_BUDGET_MB`).
+#[cfg(windows)]
+fn texture_budget_limit() -> Option<u64> {
+    static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        let mb = std::env::var("VICTORY_TEXTURE_BUDGET_MB").ok()?;
+        mb.trim().parse::<u64>().ok().map(|mb| mb << 20)
+    })
+}
+
+/// Adjusts `(idle_ms, most)` for [`let_go_idle`] so idle boot/off-screen textures
+/// are trimmed proactively whenever title-filled textures approach or exceed
+/// `VICTORY_TEXTURE_BUDGET_MB`, keeping [`room`] open for newly streamed world
+/// textures instead of deadlocking at the cap while DXGI waits on a 60s timer.
+#[cfg(any(windows, test))]
+fn texture_sweep_target(idle_ms: u64, most: u64, filled: u64, limit: Option<u64>) -> (u64, u64) {
+    let Some(limit) = limit.filter(|&l| l > 0) else {
+        return (idle_ms, most);
+    };
+    let soft = limit / 100 * 90;
+    if filled < soft {
+        return (idle_ms, most);
+    }
+    let target = limit / 100 * 82;
+    let over = filled.saturating_sub(target).max(16 << 20);
+    let budget_idle = if filled >= limit { 2_500 } else { 5_000 };
+    let new_idle = idle_ms.min(budget_idle);
+    let new_most = if most == u64::MAX {
+        if idle_ms >= 30_000 { over } else { u64::MAX }
+    } else {
+        most.max(over)
+    };
+    (new_idle, new_most)
+}
+
 /// Whether more host copies of textures the title fills may be made for
 /// shaders that pick textures by index (`draw.rs` `heap_textures`): always
 /// up to [`texture_floor_bytes`] bytes of them, beyond that while the card's
@@ -1792,11 +1828,7 @@ fn room_allows(
 #[cfg(windows)]
 pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
-    static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    let limit = *LIMIT.get_or_init(|| {
-        let mb = std::env::var("VICTORY_TEXTURE_BUDGET_MB").ok()?;
-        mb.trim().parse::<u64>().ok().map(|mb| mb << 20)
-    });
+    let limit = texture_budget_limit();
     // (With the tiles of the copies made level by level, whose own bytes
     // count as none: `crate::tiles`.)
     let filled = KINDS[1].load(Relaxed) + crate::tiles::given_total();
@@ -1811,24 +1843,20 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
     )
 }
 
-/// Small emergency cushion (+128 MiB) when `!room` and `VICTORY_TILES_TAIL_ALWAYS=1`
-/// so tiny/tail-only placed textures still upload instead of rendering pitch black,
-/// while still honoring the DXGI VRAM budget and reserved room for render targets
-/// and card buffers so WDDM never starts paging over PCIe.
+/// Emergency cushion (+256 MiB over `VICTORY_TEXTURE_BUDGET_MB`) when `!room`
+/// and `VICTORY_TILES_TAIL_ALWAYS=1` so tiny/tail-only placed textures still
+/// upload instead of rendering pitch black, while still honoring the DXGI VRAM
+/// budget and reserved room for render targets and card buffers so WDDM never
+/// starts paging over PCIe.
 #[cfg(windows)]
 pub(crate) fn room_emergency(memory: Option<[u64; 4]>) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     if !crate::tiles::tail_always() {
         return false;
     }
-    const CUSHION: u64 = 128 << 20;
+    const CUSHION: u64 = 256 << 20;
     let filled = KINDS[1].load(Relaxed) + crate::tiles::given_total();
-    static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    let limit = *LIMIT.get_or_init(|| {
-        let mb = std::env::var("VICTORY_TEXTURE_BUDGET_MB").ok()?;
-        mb.trim().parse::<u64>().ok().map(|mb| mb << 20)
-    });
-    if let Some(limit) = limit
+    if let Some(limit) = texture_budget_limit()
         && filled >= limit.saturating_add(CUSHION)
     {
         return false;
@@ -2206,6 +2234,8 @@ pub(crate) fn let_go_idle() {
         }
         _ => (crate::host::vram_idle_ms(memory), u64::MAX),
     };
+    let filled = KINDS[1].load(Relaxed) + crate::tiles::given_total();
+    let (idle_ms, most) = texture_sweep_target(idle_ms, most, filled, texture_budget_limit());
     // For the trail (`crate::host::trail`): how many went, their bytes,
     // and the first one.
     let (mut went, mut bytes, mut first) = (0u64, 0u64, None);
@@ -4777,6 +4807,25 @@ float4 lit() : SV_Target { return 1.0; }
         assert_eq!(drop_floor_for(128, 128, 0, 512, 256), 0);
         assert_eq!(drop_floor_for(1024, 1024, 3, 512, 256), 3);
         assert_eq!(drop_floor_for(1024, 1024, 0, 512, 0), 0);
+    }
+
+    #[test]
+    fn texture_sweep_target_trims_proactively_near_texture_budget() {
+        let limit = Some(750 << 20);
+        // Below 90% of texture budget: keeps DXGI 60s idle timer untouched.
+        assert_eq!(texture_sweep_target(60_000, u64::MAX, 600 << 20, limit), (60_000, u64::MAX));
+        // Between 90% and 100% (690 MiB / 750 MiB): trims oldest 5s-idle textures down to 82%.
+        let (idle, most) = texture_sweep_target(60_000, u64::MAX, 690 << 20, limit);
+        assert_eq!(idle, 5_000);
+        assert_eq!(most, (690 << 20) - ((750u64 << 20) / 100 * 82));
+        // Over 100% (780 MiB / 750 MiB): tightens to 2.5s idle to free room immediately.
+        let (idle, most) = texture_sweep_target(60_000, u64::MAX, 780 << 20, limit);
+        assert_eq!(idle, 2_500);
+        assert_eq!(most, (780 << 20) - ((750u64 << 20) / 100 * 82));
+        // When DXGI pressure is already stricter (1.5s, 256 MiB), keeps the stricter values.
+        assert_eq!(texture_sweep_target(1_500, 256 << 20, 780 << 20, limit), (1_500, 256 << 20));
+        // Without a configured texture budget: untouched.
+        assert_eq!(texture_sweep_target(60_000, u64::MAX, 900 << 20, None), (60_000, u64::MAX));
     }
 
     /// Regression test: `host_texture_as(..., reserved = true)` must create a
