@@ -50,7 +50,7 @@ if not defined VICTORY_VSYNC set "VICTORY_VSYNC=0"
 rem 3. No hardware Ray Tracing: zero-VRAM No-RT + diffuse GI + specular reflections stand-in + clean indoor fog cap
 if not defined VICTORY_RT_NO_ARENAS set "VICTORY_RT_NO_ARENAS=1"
 if not defined VICTORY_MEMORY_CARD_MB set "VICTORY_MEMORY_CARD_MB=0"
-if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1.3"
+if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=constant:0.5"
 if not defined VICTORY_AMBIENT_SPECULAR set "VICTORY_AMBIENT_SPECULAR=1"
 if not defined VICTORY_AMBIENT_FAST set "VICTORY_AMBIENT_FAST=1"
 if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.25"
