@@ -50,10 +50,10 @@ if not defined VICTORY_VSYNC set "VICTORY_VSYNC=0"
 rem 3. No hardware Ray Tracing: zero-VRAM No-RT + diffuse GI + specular reflections stand-in + clean indoor fog cap
 if not defined VICTORY_RT_NO_ARENAS set "VICTORY_RT_NO_ARENAS=1"
 if not defined VICTORY_MEMORY_CARD_MB set "VICTORY_MEMORY_CARD_MB=0"
-if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1.0"
+if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1.3"
 if not defined VICTORY_AMBIENT_SPECULAR set "VICTORY_AMBIENT_SPECULAR=1"
 if not defined VICTORY_AMBIENT_FAST set "VICTORY_AMBIENT_FAST=1"
-if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.10"
+if not defined VICTORY_AMBIENT_FLOOR set "VICTORY_AMBIENT_FLOOR=0.25"
 if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.2"
 
 rem 4. Async Stage-2 relay, parallel landing, card steps & 6-core CPU command-list pipeline
@@ -81,7 +81,7 @@ if not defined VICTORY_SHOW_AFTER set "VICTORY_SHOW_AFTER=1"
 
 rem 5. Built-in Series S FSR Quality + RCAS GPU compute upscaler + optional AMD FSR 3-style Frame Generation + on-screen FPS HUD (F4 toggle)
 if not defined VICTORY_FSR_SCALE set "VICTORY_FSR_SCALE=1.35"
-if not defined VICTORY_FSR_SHARPEN set "VICTORY_FSR_SHARPEN=0.55"
+if not defined VICTORY_FSR_SHARPEN set "VICTORY_FSR_SHARPEN=0.25"
 if not defined VICTORY_FRAME_GEN set "VICTORY_FRAME_GEN=0"
 if not defined VICTORY_FPS_HUD set "VICTORY_FPS_HUD=right"
 if not defined VICTORY_INPUT_GLYPHS set "VICTORY_INPUT_GLYPHS=auto"
