@@ -31,7 +31,11 @@ if not defined VICTORY_LIBRARY_LOCK set "VICTORY_LIBRARY_LOCK=1"
 if not defined VICTORY_LIBRARY_MAP set "VICTORY_LIBRARY_MAP=0"
 
 echo [1/2] Pre-translating all GTA VI shaders into %VICTORY_CACHE_DIR%\shaders ...
-"%runner%" shaders "%VICTORY_GAME_DIR%"
+if exist "%VICTORY_GAME_DIR%\shaders.rpf" (
+  "%runner%" shaders "%VICTORY_GAME_DIR%\shaders.rpf" "%VICTORY_GAME_DIR%\game_scarlett_master.exe"
+) else (
+  "%runner%" shaders "%VICTORY_GAME_DIR%"
+)
 if errorlevel 1 exit /b %errorlevel%
 
 echo.
