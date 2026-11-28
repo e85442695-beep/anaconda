@@ -39,7 +39,7 @@ if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=768"
 if not defined VICTORY_CARD_WINDOWS_MB set "VICTORY_CARD_WINDOWS_MB=0"
 
 rem 2. Turing/NVIDIA shader & descriptor optimizations (Early-Z, Wave32 tickets, raw-view clamp, safe pipeline library)
-if not defined VICTORY_SHADER_OPT set "VICTORY_SHADER_OPT=127"
+if not defined VICTORY_SHADER_OPT set "VICTORY_SHADER_OPT=63"
 if not defined VICTORY_EARLY_DEPTH set "VICTORY_EARLY_DEPTH=1"
 if not defined VICTORY_THREAD_TICKET set "VICTORY_THREAD_TICKET=1"
 if not defined VICTORY_RAW_VIEW_CLAMP set "VICTORY_RAW_VIEW_CLAMP=1"
