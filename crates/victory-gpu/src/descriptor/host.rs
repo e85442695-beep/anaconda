@@ -1559,6 +1559,29 @@ pub(crate) fn probe_view_limit() {
 /// table past them is made afresh in these slots like any other.
 pub(crate) const DYNAMIC: u32 = 1 << 18;
 
+/// Host resources let go when a list gives its dynamic slots back. A slot
+/// that was freed but still held its view kept a texture or a card buffer
+/// alive: its owner let go of it, yet the COM count never fell to one, so
+/// the idle sweeps could not release it and VRAM grew without bound in the
+/// open world.
+static KEPT_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `VICTORY_KEEP_RELEASE=0`: keep the old behaviour (slots given back still
+/// hold their views) for an A/B run, without another build.
+fn release_kept() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_KEEP_RELEASE").is_none_or(|v| v != "0"))
+}
+
+pub(crate) fn kept_dropped() -> u64 {
+    KEPT_DROPPED.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Dynamic slots free now, for the frame-rate line.
+pub(crate) fn dynamic_free() -> Option<u32> {
+    crate::descriptor::with_view_heap(HostHeap::free_slots)
+}
+
 /// [`DYNAMIC`] for a heap of `count` title slots whose null slot is `null`
 /// (0: none): up to four times as many where the host heap has the room (a
 /// host that takes more than [`PORTABLE_VIEWS`]; `VICTORY_DYNAMIC_SLOTS`
@@ -1856,6 +1879,10 @@ impl HostHeap {
     /// when the host caps its size.
     pub(crate) fn count(&self) -> u32 {
         self.count
+    }
+
+    fn free_slots(&self) -> u32 {
+        self.free.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The GPU address of the table of element strides by title slot (view
@@ -2867,13 +2894,39 @@ impl HostHeap {
         let Some(at) = first.checked_sub(self.count) else {
             return;
         };
-        let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
-        let end = (at + n).min(self.dynamic) as usize;
-        if let Some(slots) = guard.1.get_mut(at as usize..end) {
-            let given = slots.iter().filter(|taken| **taken).count() as u32;
-            self.free.fetch_add(given, std::sync::atomic::Ordering::Relaxed);
-            self.too_long.store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
-            slots.fill(false);
+        let mut gone = Vec::new();
+        {
+            // `dynamic` takes slots under this same lock, so a slot cannot be
+            // handed out again while its old view is let go here.
+            let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
+            let end = (at + n).min(self.dynamic) as usize;
+            if let Some(slots) = guard.1.get_mut(at as usize..end) {
+                let mut given = 0;
+                for (offset, taken) in slots.iter_mut().enumerate() {
+                    if !*taken {
+                        continue;
+                    }
+                    *taken = false;
+                    given += 1;
+                    if !release_kept() {
+                        continue;
+                    }
+                    let Some(kept) = self.kept.get(at as usize + offset) else {
+                        continue;
+                    };
+                    if let Some(held) = kept.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        gone.push(held);
+                    }
+                }
+                self.free.fetch_add(given, std::sync::atomic::Ordering::Relaxed);
+                self.too_long.store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
+                KEPT_DROPPED.fetch_add(gone.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        // A submission that still reads the slot finished before the list's
+        // tables were given back; `retire_resource` waits for any that do not.
+        for resource in gone {
+            crate::host::retire_resource(resource);
         }
     }
 
@@ -5803,6 +5856,31 @@ mod tests {
         heap.release(heap.id(), a, 50);
         assert_eq!(heap.dynamic(50), Some(4));
         assert_eq!(heap.dynamic(40), Some(4 + heap.dynamic - 40));
+    }
+
+    #[test]
+    fn released_slots_let_go_of_their_views() {
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return; // no host GPU
+        };
+        let Some(host) = host() else {
+            return;
+        };
+        let Some(buffer) = host.uav_buffer(4096) else {
+            return;
+        };
+        let before = kept_dropped();
+        let at = heap.dynamic(1).unwrap() - heap.count();
+        assert!(heap.kept_in(at).is_none());
+        heap.keep(at, Some(buffer));
+        assert!(heap.kept_in(at).is_some());
+        assert_eq!(heap.free_slots(), heap.free.load(std::sync::atomic::Ordering::Relaxed));
+        // A list that ran gives its slot back; the view must go with it, or
+        // the host texture stays alive with nothing naming it.
+        heap.release(heap.id(), heap.count() + at, 1);
+        assert!(heap.kept_in(at).is_none());
+        assert_eq!(kept_dropped(), before + 1);
+        assert!(heap.dynamic(1).is_some());
     }
 
     #[test]

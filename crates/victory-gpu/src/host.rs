@@ -8796,6 +8796,8 @@ impl PerformanceWindow {
             frame_ms = format_args!("{:.1}", self.elapsed_ms / frames),
             draws_per_frame = format_args!("{:.0}", self.draws as f64 / frames),
             dropped_per_frame = format_args!("{:.1}", self.dropped as f64 / frames),
+            dyn_free = crate::descriptor::host::dynamic_free(),
+            slots_kept_dropped = crate::descriptor::host::kept_dropped(),
             cpu_prepare_ms = format_args!("{:.1}", self.cpu_prepare_ms / frames),
             copy_prepare_ms = format_args!("{:.1}", self.copy_prepare_ms / frames),
             copy_mb = format_args!("{:.1}", self.copy_mb / frames),
