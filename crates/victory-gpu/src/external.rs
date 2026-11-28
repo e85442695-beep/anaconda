@@ -245,36 +245,56 @@ void main(uint3 id : SV_DispatchThreadID) {
         float3 sigma = sqrt(max(m2 - m1 * m1, 0.0));
         float3 box_min = min(y0, min(min(min(y1, y2), min(y3, y4)), min(min(y5, y6), min(y7, y8))));
         float3 box_max = max(y0, max(max(max(y1, y2), max(y3, y4)), max(max(y5, y6), max(y7, y8))));
-        const float GAMMA = 1.15;
+        const float GAMMA = 0.95;
         float3 clip_min = max(box_min, m1 - GAMMA * sigma);
         float3 clip_max = min(box_max, m1 + GAMMA * sigma);
 
-        // 5-tap cross dilated motion vector (picks largest velocity to avoid moving-edge trails)
+        // Self-validating motion reprojection: test 0, +mv, and -mv against
+        // the current frame so sign/scale differences in title MVs can never
+        // stretch or smear moving characters when walking.
         float2 mv_uv = 0.0;
         float2 mv_uv_sample = clamp(out_uv * mv_uv_max, 0.0, mv_uv_max);
         if ((flags & 2u) != 0u) {
-            float2 mv_step = inv_src;
             float2 mv_c = motion_tex.SampleLevel(samp, mv_uv_sample, 0.0).xy;
-            float2 mv_n = motion_tex.SampleLevel(samp, clamp(mv_uv_sample + float2(0.0, -mv_step.y), 0.0, mv_uv_max), 0.0).xy;
-            float2 mv_s = motion_tex.SampleLevel(samp, clamp(mv_uv_sample + float2(0.0,  mv_step.y), 0.0, mv_uv_max), 0.0).xy;
-            float2 mv_w = motion_tex.SampleLevel(samp, clamp(mv_uv_sample + float2(-mv_step.x, 0.0), 0.0, mv_uv_max), 0.0).xy;
-            float2 mv_e = motion_tex.SampleLevel(samp, clamp(mv_uv_sample + float2( mv_step.x, 0.0), 0.0, mv_uv_max), 0.0).xy;
-            float2 best = all(isfinite(mv_c)) ? mv_c : 0.0;
-            float best_sq = dot(best, best);
-            if (all(isfinite(mv_n)) && dot(mv_n, mv_n) > best_sq) { best = mv_n; best_sq = dot(mv_n, mv_n); }
-            if (all(isfinite(mv_s)) && dot(mv_s, mv_s) > best_sq) { best = mv_s; best_sq = dot(mv_s, mv_s); }
-            if (all(isfinite(mv_w)) && dot(mv_w, mv_w) > best_sq) { best = mv_w; best_sq = dot(mv_w, mv_w); }
-            if (all(isfinite(mv_e)) && dot(mv_e, mv_e) > best_sq) { best = mv_e; }
-            mv_uv = best * mv_uv_scale;
+            if (all(isfinite(mv_c))) {
+                mv_uv = clamp(mv_c * mv_uv_scale, -0.05, 0.05);
+            }
         }
 
-        float2 prev_uv = out_uv + mv_uv;
-        if (all(prev_uv >= 0.0) && all(prev_uv <= 1.0)) {
-            float2 h_min = inv_out * 0.5;
-            float2 h_max = max(1.0 - h_min, h_min);
+        float2 h_min = inv_out * 0.5;
+        float2 h_max = max(1.0 - h_min, h_min);
+        float3 curr_tm = tonemap(curr_rgb);
+
+        float2 uv0 = clamp(out_uv, h_min, h_max);
+        float3 h0 = safe_hdr(prev_hist.SampleLevel(samp, uv0, 0.0).rgb, curr_rgb);
+        float best_err = length(tonemap(h0) - curr_tm);
+        float2 best_uv = out_uv;
+
+        if (dot(mv_uv, mv_uv) > 1e-10) {
+            float2 uv_p = out_uv + mv_uv;
+            if (all(uv_p >= 0.0) && all(uv_p <= 1.0)) {
+                float3 hp = safe_hdr(prev_hist.SampleLevel(samp, clamp(uv_p, h_min, h_max), 0.0).rgb, curr_rgb);
+                float ep = length(tonemap(hp) - curr_tm);
+                if (ep < best_err) {
+                    best_err = ep;
+                    best_uv = uv_p;
+                }
+            }
+            float2 uv_m = out_uv - mv_uv;
+            if (all(uv_m >= 0.0) && all(uv_m <= 1.0)) {
+                float3 hm = safe_hdr(prev_hist.SampleLevel(samp, clamp(uv_m, h_min, h_max), 0.0).rgb, curr_rgb);
+                float em = length(tonemap(hm) - curr_tm);
+                if (em < best_err) {
+                    best_err = em;
+                    best_uv = uv_m;
+                }
+            }
+        }
+
+        if (all(best_uv >= 0.0) && all(best_uv <= 1.0)) {
             float3 hist_rgb;
-            if (!sample_catmull_rom(prev_hist, clamp(prev_uv, h_min, h_max), inv_out, h_min, h_max, hist_rgb)) {
-                hist_rgb = safe_hdr(prev_hist.SampleLevel(samp, clamp(prev_uv, h_min, h_max), 0.0).rgb, curr_rgb);
+            if (!sample_catmull_rom(prev_hist, clamp(best_uv, h_min, h_max), inv_out, h_min, h_max, hist_rgb)) {
+                hist_rgb = safe_hdr(prev_hist.SampleLevel(samp, clamp(best_uv, h_min, h_max), 0.0).rgb, curr_rgb);
             }
             hist_rgb = safe_hdr(hist_rgb, curr_rgb);
 
@@ -282,18 +302,19 @@ void main(uint3 id : SV_DispatchThreadID) {
             float3 clamped_ycc = clamp(hist_ycc, clip_min, clip_max);
             float clip_dist = length(hist_ycc - clamped_ycc);
 
-            float speed_px = length(mv_uv * float2(out_size));
-            float alpha = lerp(0.10, 0.28, saturate(speed_px / 12.0));
-            alpha = saturate(alpha + 0.15 * saturate(clip_dist * 4.0));
+            float speed_px = length((best_uv - out_uv) * float2(out_size));
+            float alpha = lerp(0.16, 0.45, saturate(speed_px / 8.0));
+            alpha = saturate(alpha + 0.25 * saturate(clip_dist * 5.0));
+            // Reject large motion/disocclusion mismatches immediately (zero walking stretch)
+            alpha = lerp(alpha, 0.92, saturate((best_err - 0.04) * 12.0));
             if ((flags & 4u) != 0u) {
                 float react = reactive_tex.SampleLevel(samp, mv_uv_sample, 0.0).r;
                 if (isfinite(react)) {
-                    alpha = lerp(alpha, 0.85, saturate(react));
+                    alpha = lerp(alpha, 0.90, saturate(react));
                 }
             }
 
             float3 hist_tm = ycocg_to_rgb(clamped_ycc);
-            float3 curr_tm = tonemap(curr_rgb);
             float3 blended_tm = lerp(hist_tm, curr_tm, alpha);
             accum_rgb = inv_tonemap(blended_tm);
         }

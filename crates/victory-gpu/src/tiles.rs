@@ -308,6 +308,49 @@ pub(crate) fn heaps_returned() -> u64 {
     STATS[8].load(Ordering::Relaxed)
 }
 
+/// Maximum total tile-pool heap bytes (`VICTORY_TILES_MAX_MB`; default `288 MiB`
+/// on `<= 4 GiB` cards so tiled textures never overflow into WDDM PCIe paging;
+/// `0` = unlimited on larger cards).
+pub(crate) fn max_bytes() -> u64 {
+    static MAX: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        if let Some(mb) = std::env::var("VICTORY_TILES_MAX_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+        {
+            return mb << 20;
+        }
+        const FOUR_GIB: u64 = 4 << 30;
+        let low_vram = host()
+            .and_then(crate::host::Host::video_memory)
+            .is_some_and(|[budget, ..]| budget <= FOUR_GIB);
+        if low_vram { 288 << 20 } else { 0 }
+    })
+}
+
+/// Pure gate deciding whether [`take`] may create a new tile pool `ID3D12Heap`
+/// of `add_bytes` when `heaps_bytes` are already allocated.
+///
+/// Always allows reaching a 128 MiB minimum floor so boot/UI textures work,
+/// then enforces both `VICTORY_TILES_MAX_MB` and the DXGI 94% VRAM ceiling so
+/// deferred tile uploads can never explode VRAM past 4 GB into WDDM paging.
+fn can_grow_heap(heaps_bytes: u64, add_bytes: u64, max_bytes: u64, memory: Option<[u64; 4]>) -> bool {
+    const FLOOR: u64 = 128 << 20;
+    if heaps_bytes < FLOOR {
+        return true;
+    }
+    if max_bytes > 0 && heaps_bytes.saturating_add(add_bytes) > max_bytes {
+        return false;
+    }
+    if let Some([budget, used, ..]) = memory
+        && budget > 0
+        && used.saturating_add(add_bytes) > budget / 100 * 94
+    {
+        return false;
+    }
+    true
+}
+
 /// Default tile-heap size in 64 KiB tiles: 256 tiles (16 MiB) on <= 6 GiB VRAM
 /// cards so sparsely populated heaps drain and return VRAM promptly instead of
 /// pinning 64 MiB per stray mip tail; 1024 tiles (64 MiB) on larger GPUs.
@@ -374,8 +417,13 @@ fn take(device: &ID3D12Device, count: u32) -> Option<(ID3D12Heap, usize, Vec<(u3
         Some(index) => index,
         None => {
             let capacity = default_heap_tiles().max(count.next_power_of_two()).min(HEAP_TILES);
+            let add_bytes = u64::from(capacity) * TILE;
+            let memory = host().and_then(crate::host::Host::video_memory);
+            if !can_grow_heap(heaps_total(), add_bytes, max_bytes(), memory) {
+                return None;
+            }
             let desc = D3D12_HEAP_DESC {
-                SizeInBytes: u64::from(capacity) * TILE,
+                SizeInBytes: add_bytes,
                 Properties: D3D12_HEAP_PROPERTIES {
                     Type: D3D12_HEAP_TYPE_DEFAULT,
                     ..Default::default()
@@ -2022,5 +2070,23 @@ void look() {
             tail_fallback_mask_for(&[64], 0, 1, &[false], false, 0b1),
             0
         );
+    }
+
+    #[test]
+    fn tile_heap_growth_respects_max_cap_and_dxgi_budget() {
+        let cap = 288 << 20;
+        let add = 16 << 20;
+        let ok_mem = Some([2800 << 20, 2200 << 20, 0, 0]);
+        let tight_mem = Some([2800 << 20, 2650 << 20, 0, 0]);
+        // Below 128 MiB floor: always allowed.
+        assert!(can_grow_heap(64 << 20, add, cap, tight_mem));
+        // Within cap and DXGI headroom: allowed.
+        assert!(can_grow_heap(256 << 20, add, cap, ok_mem));
+        // Would exceed 288 MiB hard cap: blocked (prevents 928 MiB blowup).
+        assert!(!can_grow_heap(288 << 20, add, cap, ok_mem));
+        // Within cap, but DXGI VRAM >= 94%: blocked (prevents WDDM paging).
+        assert!(!can_grow_heap(192 << 20, add, cap, tight_mem));
+        // Unlimited cap (0) with ample DXGI headroom: allowed.
+        assert!(can_grow_heap(512 << 20, add, 0, Some([12_000 << 20, 4_000 << 20, 0, 0])));
     }
 }

@@ -74,7 +74,7 @@ fn cut_threshold() -> f32 {
         std::env::var("VICTORY_FRAME_GEN_CUT")
             .ok()
             .and_then(|v| v.trim().parse::<f32>().ok())
-            .unwrap_or(0.22)
+            .unwrap_or(0.16)
             .clamp(0.05, 1.0)
     })
 }
@@ -286,8 +286,10 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
 
     float2 inv_size = 1.0 / float2(size);
-    float2 uv_f = clamp((sum_f / max(wf_tot, 1e-5)) * inv_size, -0.15, 0.15);
-    float2 uv_b = clamp((sum_b / max(wb_tot, 1e-5)) * inv_size, -0.15, 0.15);
+    // Clamp optical flow to +/-7.5% of frame (~96 px at 720p, half the old
+    // +/-192 px extreme warp) so huge low-FPS jumps cannot stretch geometry.
+    float2 uv_f = clamp((sum_f / max(wf_tot, 1e-5)) * inv_size, -0.075, 0.075);
+    float2 uv_b = clamp((sum_b / max(wb_tot, 1e-5)) * inv_size, -0.075, 0.075);
     out_uv[id.xy] = float4(uv_f, uv_b);
 }
 "#;
@@ -421,21 +423,27 @@ void main(uint3 id : SV_DispatchThreadID) {
         best_e = eb;
     }
 
-    // Disocclusion-aware blend weight: clean midpoint when consistent, bias to
-    // the non-occluded frame when foreground uncovers new background.
+    // Disocclusion-aware blend weight + unwarped safety fallback: when optical
+    // flow cannot match a large jump cleanly (walking/turning at low FPS),
+    // blend toward the non-occluded unwarped pixel instead of stretching.
     float w = alpha;
-    if (best_e > 0.14) {
-        float disocc = saturate((best_e - 0.14) * 4.0);
+    float3 unwarped_safe = c0;
+    if (best_e > 0.12) {
+        float disocc = saturate((best_e - 0.12) * 4.5);
         if (fb_err_f > fb_err_b + 0.015) {
             w = lerp(alpha, 1.0, disocc);
+            unwarped_safe = c0;
         } else if (fb_err_b > fb_err_f + 0.015) {
             w = lerp(alpha, 0.0, disocc);
+            unwarped_safe = p0;
         } else {
             w = lerp(alpha, 1.0, disocc * 0.75);
         }
     }
 
-    float3 col = lerp(best_p, best_c, w);
+    float bad_warp = saturate((best_e - 0.18) * 5.0);
+    float3 warped = lerp(best_p, best_c, w);
+    float3 col = lerp(warped, unwarped_safe, bad_warp);
     if (srgb_out != 0u) {
         col = linear_to_srgb(col);
     }

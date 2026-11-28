@@ -2691,6 +2691,7 @@ impl State {
             BAKE_SERVED.store(0, Ordering::Relaxed);
         }
         let mut served = true;
+        let mut tail_admitted_bytes = 0u64;
         for (index, write) in due {
             if SPENT.load(Ordering::Relaxed) >= bytes_at_most || began.elapsed() > span {
                 served = false;
@@ -2813,11 +2814,13 @@ impl State {
                 let has_its_texture = reupload_when_full()
                     && heap.handle(index).is_some_and(|handle| host.texture_slot_made_from(index, handle));
                 // With `VICTORY_TILES_TAIL_ALWAYS=1`, still allow placed 2D
-                // textures through under an emergency cushion (+256 MiB, DXGI
-                // < 96%), OR — even when DXGI is tight — allow tiled placed 2D
-                // textures whenever the tile pool already has paid-for free
-                // tiles (>= 1 MiB, costing 0 bytes of new VRAM) so their
-                // minimal mip tail maps instead of staying `null_view` black.
+                // textures through under a tight emergency cushion (+96 MiB,
+                // DXGI < 94%), OR — even when DXGI is tight — allow a strictly
+                // budgeted batch (<= 2 MiB and <= half of already-paid-for free
+                // pool bytes) of tiled placed 2D textures per pass so deferred
+                // uploads map their mip tail at 0 new VRAM without flooding
+                // `tiles::take()` into allocating extra heaps.
+                let free_tile_room = crate::tiles::free_pool_bytes() / 2;
                 let allow_tail = !has_its_texture
                     && matches!(
                         heap.handle(index).and_then(crate::descriptor::view),
@@ -2825,10 +2828,13 @@ impl State {
                             && (crate::resource::room_emergency(memory)
                                 || (crate::tiles::wanted()
                                     && crate::tiles::tail_always()
-                                    && crate::tiles::free_pool_bytes() >= (1 << 20)
+                                    && tail_admitted_bytes + (64 << 10) <= free_tile_room.min(2 << 20)
                                     && crate::resource::placed_bytes(&resource)
                                         .is_some_and(|b| b >= crate::tiles::floor())))
                     );
+                if allow_tail {
+                    tail_admitted_bytes += 64 << 10;
+                }
                 if !has_its_texture && !allow_tail {
                     refused += 1;
                     if full_card_pass() {

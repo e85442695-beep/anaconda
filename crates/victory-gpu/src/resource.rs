@@ -1806,9 +1806,9 @@ fn texture_sweep_target(idle_ms: u64, most: u64, filled: u64, limit: Option<u64>
     if filled < soft {
         return (idle_ms, most);
     }
-    let target = limit / 100 * 82;
+    let target = limit / 100 * 80;
     let over = filled.saturating_sub(target).max(16 << 20);
-    let budget_idle = if filled >= limit { 2_500 } else { 5_000 };
+    let budget_idle = if filled >= limit { 1_500 } else { 4_000 };
     let new_idle = idle_ms.min(budget_idle);
     let new_most = if most == u64::MAX {
         if idle_ms >= 30_000 { over } else { u64::MAX }
@@ -1843,18 +1843,17 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
     )
 }
 
-/// Emergency cushion (+256 MiB over `VICTORY_TEXTURE_BUDGET_MB`) when `!room`
-/// and `VICTORY_TILES_TAIL_ALWAYS=1` so tiny/tail-only placed textures still
-/// upload instead of rendering pitch black, while still honoring the DXGI VRAM
-/// budget and reserved room for render targets and card buffers so WDDM never
-/// starts paging over PCIe.
+/// Tight emergency cushion (+96 MiB over `VICTORY_TEXTURE_BUDGET_MB`) when
+/// `!room` and `VICTORY_TILES_TAIL_ALWAYS=1` so tiny/tail-only placed textures
+/// still upload instead of rendering pitch black, while staying strictly under
+/// 94% of the DXGI VRAM budget so WDDM never starts paging over PCIe.
 #[cfg(windows)]
 pub(crate) fn room_emergency(memory: Option<[u64; 4]>) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     if !crate::tiles::tail_always() {
         return false;
     }
-    const CUSHION: u64 = 256 << 20;
+    const CUSHION: u64 = 96 << 20;
     let filled = KINDS[1].load(Relaxed) + crate::tiles::given_total();
     if let Some(limit) = texture_budget_limit()
         && filled >= limit.saturating_add(CUSHION)
@@ -1866,7 +1865,7 @@ pub(crate) fn room_emergency(memory: Option<[u64; 4]>) -> bool {
             used.saturating_sub(crate::pool::texture_room())
                 + crate::shadow::card_room_kept()
                 + targets_room_kept()
-                < budget / 100 * 96
+                < budget / 100 * 94
         }
         None => true,
     }
@@ -4814,14 +4813,14 @@ float4 lit() : SV_Target { return 1.0; }
         let limit = Some(750 << 20);
         // Below 90% of texture budget: keeps DXGI 60s idle timer untouched.
         assert_eq!(texture_sweep_target(60_000, u64::MAX, 600 << 20, limit), (60_000, u64::MAX));
-        // Between 90% and 100% (690 MiB / 750 MiB): trims oldest 5s-idle textures down to 82%.
+        // Between 90% and 100% (690 MiB / 750 MiB): trims oldest 4s-idle textures down to 80%.
         let (idle, most) = texture_sweep_target(60_000, u64::MAX, 690 << 20, limit);
-        assert_eq!(idle, 5_000);
-        assert_eq!(most, (690 << 20) - ((750u64 << 20) / 100 * 82));
-        // Over 100% (780 MiB / 750 MiB): tightens to 2.5s idle to free room immediately.
+        assert_eq!(idle, 4_000);
+        assert_eq!(most, (690 << 20) - ((750u64 << 20) / 100 * 80));
+        // Over 100% (780 MiB / 750 MiB): tightens to 1.5s idle to free room immediately.
         let (idle, most) = texture_sweep_target(60_000, u64::MAX, 780 << 20, limit);
-        assert_eq!(idle, 2_500);
-        assert_eq!(most, (780 << 20) - ((750u64 << 20) / 100 * 82));
+        assert_eq!(idle, 1_500);
+        assert_eq!(most, (780 << 20) - ((750u64 << 20) / 100 * 80));
         // When DXGI pressure is already stricter (1.5s, 256 MiB), keeps the stricter values.
         assert_eq!(texture_sweep_target(1_500, 256 << 20, 780 << 20, limit), (1_500, 256 << 20));
         // Without a configured texture budget: untouched.

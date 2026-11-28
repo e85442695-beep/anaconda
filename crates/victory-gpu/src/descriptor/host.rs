@@ -1566,8 +1566,8 @@ pub(crate) const DYNAMIC: u32 = 1 << 18;
 /// play-1125-0127: 27,000 to 35,000 tables a frame, up to 3,285 of them
 /// refused, with 2,639 indirect draws and dispatches).
 fn dynamic_slots_for(count: u32, null: u32, most: Option<u32>) -> u32 {
-    const SAFE_TITLE_SLOTS: u32 = 720_000;
-    const MIN_TITLE_SLOTS: u32 = 680_000;
+    const SAFE_TITLE_SLOTS: u32 = 680_000;
+    const MIN_TITLE_SLOTS: u32 = 640_000;
     if null < PORTABLE_VIEWS {
         let default_portable = null.saturating_sub(SAFE_TITLE_SLOTS).max(DYNAMIC);
         return match most {
@@ -6079,11 +6079,11 @@ mod bake_flip_tests {
     #[test]
     fn dynamic_slots_for_portable_heap_keeps_title_slots_safe() {
         let null = PORTABLE_VIEWS - 1; // 999_999 (NVIDIA)
-        // Default expands safely from 262_144 to 279_999 while keeping 720_000 title slots.
-        assert_eq!(dynamic_slots_for(1_245_184, null, None), null - 720_000);
-        // Explicit override clamps safely below 680_000 title slots.
-        assert_eq!(dynamic_slots_for(1_245_184, null, Some(300_000)), 300_000);
-        assert_eq!(dynamic_slots_for(1_245_184, null, Some(500_000)), null - 680_000);
+        // Default expands safely to 319_999 while keeping 680_000 title slots.
+        assert_eq!(dynamic_slots_for(1_245_184, null, None), null - 680_000);
+        // Explicit override clamps safely below 640_000 title slots.
+        assert_eq!(dynamic_slots_for(1_245_184, null, Some(340_000)), 340_000);
+        assert_eq!(dynamic_slots_for(1_245_184, null, Some(500_000)), null - 640_000);
         // Uncapped heap preserves up to DYNAMIC << 2.
         assert_eq!(dynamic_slots_for(1_245_184, UNCAPPED_VIEWS - 1, None), (UNCAPPED_VIEWS - 1) - 1_245_184);
     }
