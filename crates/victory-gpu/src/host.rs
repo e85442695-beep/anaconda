@@ -8732,8 +8732,71 @@ struct Presenter {
     framegen: Option<crate::framegen::FrameGen>,
     fps_hud: crate::fps_hud::FpsHud,
     input_glyphs: crate::input_glyphs::InputGlyphsHud,
+    /// The swap chain lets a frame be shown at once ([`tearing`]): its flags,
+    /// kept for `ResizeBuffers`, which may not change them.
+    tearing: bool,
+    /// Presents with `vsync_interval() == 0` ask for tearing; turned off for
+    /// the rest of the run if one such present is refused.
+    presents_tearing: bool,
+    /// A refused non-tearing present was logged once.
+    present_refused: bool,
     #[cfg(feature = "diagnostics")]
     panel: panel::Panel,
+}
+
+/// Whether the swap chain lets a frame be shown as soon as it is presented,
+/// not at the screen's next refresh (`DXGI_FEATURE_PRESENT_ALLOW_TEARING`;
+/// `VICTORY_TEARING=0`: off). Ported from VIctory-NVIDIA `8fc2254`.
+fn tearing(factory: &IDXGIFactory2) -> bool {
+    if std::env::var("VICTORY_TEARING").is_ok_and(|v| v.trim() == "0") {
+        return false;
+    }
+    let Ok(factory) = factory.cast::<IDXGIFactory5>() else {
+        return false;
+    };
+    let mut allowed = windows::core::BOOL(0);
+    // SAFETY: a BOOL-sized answer for this feature.
+    let asked = unsafe {
+        factory.CheckFeatureSupport(
+            DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+            (&raw mut allowed).cast(),
+            size_of_val(&allowed) as u32,
+        )
+    };
+    asked.is_ok() && allowed.as_bool()
+}
+
+fn chain_flags(tearing: bool) -> DXGI_SWAP_CHAIN_FLAG {
+    if tearing {
+        DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
+    } else {
+        DXGI_SWAP_CHAIN_FLAG(0)
+    }
+}
+
+fn present_frame(p: &mut Presenter, frame: u64) {
+    let interval = vsync_interval();
+    let allow_tearing = interval == 0 && p.presents_tearing;
+    let flags = if allow_tearing {
+        DXGI_PRESENT_ALLOW_TEARING
+    } else {
+        DXGI_PRESENT(0)
+    };
+    // SAFETY: live swap chain, back buffer transitioned to PRESENT.
+    let shown = unsafe { p.swap_chain.Present(interval, flags) };
+    if shown.is_err() && allow_tearing {
+        tracing::warn!(
+            code = %shown,
+            frame,
+            "a tearing present was refused; presenting normally for the rest of the run"
+        );
+        p.presents_tearing = false;
+        // SAFETY: fallback non-tearing present on the same live swap chain.
+        let _ = unsafe { p.swap_chain.Present(interval, DXGI_PRESENT(0)) };
+    } else if shown.is_err() && !p.present_refused {
+        p.present_refused = true;
+        tracing::warn!(code = %shown, frame, "a present was refused (logged once)");
+    }
 }
 
 /// A low-cost performance sample for release builds. The command queue's
@@ -9259,7 +9322,7 @@ impl Host {
                     width,
                     height,
                     format,
-                    DXGI_SWAP_CHAIN_FLAG(0),
+                    chain_flags(p.tearing),
                 )
             };
             match resized {
@@ -9488,7 +9551,7 @@ impl Host {
             #[cfg(feature = "diagnostics")]
             crate::replay::record::present(texture, state);
             let mut showing = crate::timeline::span("the host's Present");
-            let _ = p.swap_chain.Present(vsync_interval(), DXGI_PRESENT(0));
+            present_frame(p, frame);
             showing.next("the frame meter");
             #[cfg(feature = "diagnostics")]
             p.panel.frame(p.meter.line_due());
@@ -9753,10 +9816,7 @@ impl Host {
                 }
                 None => self.execute(&[copy]),
             }
-            // SAFETY: live swap chain, back buffer transitioned to PRESENT.
-            unsafe {
-                let _ = p.swap_chain.Present(vsync_interval(), DXGI_PRESENT(0));
-            }
+            present_frame(p, crate::frame::current());
             crate::framegen::note_generated(1);
             p.meter.note_generated(1);
             produced += 1;
@@ -9778,6 +9838,11 @@ impl Host {
         // SAFETY: plain object creation for our window.
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
+            let tearing = tearing(&factory);
+            tracing::info!(
+                tearing,
+                "swap chain: DXGI tearing support (VICTORY_TEARING=0: off)"
+            );
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width,
                 Height: height,
@@ -9789,6 +9854,7 @@ impl Host {
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 BufferCount: swap_buffers(),
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                Flags: chain_flags(tearing).0 as u32,
                 ..Default::default()
             };
             let swap_chain = factory
@@ -9811,6 +9877,9 @@ impl Host {
                 framegen: None,
                 fps_hud: crate::fps_hud::FpsHud::new(),
                 input_glyphs: crate::input_glyphs::InputGlyphsHud::new(),
+                tearing,
+                presents_tearing: tearing,
+                present_refused: false,
                 #[cfg(feature = "diagnostics")]
                 panel: panel::Panel::new(),
             })

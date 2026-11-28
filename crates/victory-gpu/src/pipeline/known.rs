@@ -219,6 +219,7 @@ pub fn use_translations(dir: PathBuf) {
 /// the number before, and what came of it after: milliseconds and whether
 /// there is one.
 pub fn make(dir: &Path, which: &[usize], mut each: impl FnMut(usize, Option<(f64, bool)>)) {
+    super::sampler_order::use_folder(dir.to_path_buf(), true);
     let mut places = HashMap::new();
     walk_shaders(dir, |stage, hash, at, len| drop(places.insert(hash, (stage, at, len))));
     let Ok(mut file) = std::fs::File::open(dir.join(SHADERS)) else { return };

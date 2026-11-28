@@ -39,14 +39,18 @@ if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
 if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=704"
 if not defined VICTORY_CARD_WINDOWS_MB set "VICTORY_CARD_WINDOWS_MB=0"
 
-rem 2. Turing/NVIDIA shader & descriptor optimizations (Early-Z, Wave32 tickets, raw-view clamp, safe pipeline library)
+rem 2. Turing/NVIDIA shader, pipeline cache & descriptor optimizations (Early-Z, Wave32 tickets, water light slots, static sampler order, DXGI tearing)
 if not defined VICTORY_SHADER_OPT set "VICTORY_SHADER_OPT=63"
 if not defined VICTORY_EARLY_DEPTH set "VICTORY_EARLY_DEPTH=1"
 if not defined VICTORY_THREAD_TICKET set "VICTORY_THREAD_TICKET=1"
 if not defined VICTORY_RAW_VIEW_CLAMP set "VICTORY_RAW_VIEW_CLAMP=1"
+if not defined VICTORY_WATER_TILE_SLOTS set "VICTORY_WATER_TILE_SLOTS=1"
+if not defined VICTORY_SAMPLER_ORDER set "VICTORY_SAMPLER_ORDER=1"
+if not defined VICTORY_PIPELINE_BOOK set "VICTORY_PIPELINE_BOOK=1"
 if not defined VICTORY_LIBRARY_LOCK set "VICTORY_LIBRARY_LOCK=1"
 if not defined VICTORY_LIBRARY_MAP set "VICTORY_LIBRARY_MAP=0"
 if not defined VICTORY_VSYNC set "VICTORY_VSYNC=0"
+if not defined VICTORY_TEARING set "VICTORY_TEARING=1"
 
 rem 3. No hardware Ray Tracing: zero-VRAM No-RT + diffuse GI + specular reflections stand-in + clean indoor fog cap
 if not defined VICTORY_RT_NO_ARENAS set "VICTORY_RT_NO_ARENAS=1"

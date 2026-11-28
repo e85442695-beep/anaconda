@@ -75,18 +75,32 @@ Built on top of `codec-d/cool_fox` (`pareto-residency`) and `VIctory`, tuned spe
 - Pinned Rust toolchain (`rust-toolchain.toml`) + MSVC C++ Build Tools + Windows SDK
 - Your own Xbox Series game dump
 
-### Build & Run
+### Build, Shader Warmup & Run
 
 ```powershell
 cargo build --release --locked -p victory
 ```
 
-Point `VICTORY_GAME_DIR` at your dump folder and launch with the 4 GB preset:
+Point `VICTORY_GAME_DIR` at your dump folder:
 
 ```powershell
 $env:VICTORY_GAME_DIR = 'D:\Path\To\YourDump'
+
+# Optional (recommended): pre-translate all shaders & warm GPU driver pipeline cache once
+.\Warmup-Shaders.cmd
+
+# Launch for 4 GB VRAM / low-end GPUs (GTX 1650, RX 570 4 GB, etc.):
 .\Play-Anaconda.cmd
+
+# Launch for 8-16+ GB VRAM GPUs (RTX 3060/4060/4070/5070, RX 7800/7900, etc.):
+.\Play-Anaconda-HighEnd.cmd
 ```
+
+### Unified Community Fixes (GPL-3.0)
+Alongside Anaconda's 4 GB VRAM / No-RT architecture, built-in Temporal TAAU upscaler, Optical Flow Frame Generation, live PC Specs HUD (`F4`), and auto Xbox/KBM Input Glyphs, this build integrates verified rendering, shader, and pipeline-cache fixes from top [PortWatch VI](https://portwatch-vi.xyz/) forks (GPL-3.0-or-later):
+- **`fxceless/victory-fork`**: deterministic static-sampler ordering (`sampler_order.rs` — eliminates shader/PSO recompilation on every restart), Wave32 open-water light tile slots (`water_tile_slots.rs`, fixes dark water patches), tiled `ResourceMinLODClamp` fix, split-submission dynamic descriptor slot reclamation.
+- **`trustno1-coder/VIctory-NVIDIA`**: DXGI swap-chain tearing (`VICTORY_TEARING=1`), `victory warm` refusal handling, faster shader precompile skipping non-shader packs, console texture formats 189–191, multisampled BC layout guard, shader division zero-operand & scalar bounds/unspill fixes.
+- **`DexNom/VIctory`**: Wave64 voxel visibility shader recovery (`structure.rs`), pixel quad sampling & sparse texture fixes.
 
 Optionally copy [`docs/settings-very-low.xml`](docs/settings-very-low.xml) into:
 `%LOCALAPPDATA%\Anaconda\data-s\7952987A\storage\settings\settings.xml`

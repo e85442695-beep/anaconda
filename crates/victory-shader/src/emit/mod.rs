@@ -111,6 +111,7 @@ mod waterfall_tests;
 #[cfg(all(test, windows))]
 mod wave64_tests;
 mod wave;
+mod water_tile_slots;
 
 use crate::dxbc::{Container, FourCC};
 use crate::native::{HwStage, NativeProgram, RootType};
@@ -481,13 +482,24 @@ pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
     }
 }
 
+/// Brings a console program into the form this host translates, where one differs from the
+/// program as the title has it: on a host of 32-lane waves the water light's tile lists take
+/// a slot a lane ([`water_tile_slots`]). [`translate`] does this itself; a caller that parses
+/// the container and calls [`emit`] calls this first. Returns whether the program changed.
+pub fn host_form(c: &Container, native: &mut NativeProgram) -> bool {
+    lower::host_max_wave() == 32
+        && c.digest == water_tile_slots::CONTAINER
+        && water_tile_slots::on()
+        && water_tile_slots::rewrite(native)
+}
+
 fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
     let c = Container::parse(container)?;
     let dxil = c
         .part(FourCC::DXIL)
         .or(c.part(FourCC::ACCC))
         .ok_or(ShaderError::Malformed("no DXIL part"))?;
-    let native = crate::native_programs(dxil.data)?
+    let mut native = crate::native_programs(dxil.data)?
         .into_iter()
         .find(|p| {
             matches!(
@@ -499,6 +511,9 @@ fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
             offset: 0,
             what: "a container without a vertex, pixel, compute or mesh program",
         })?;
+    // The water light's tile lists on a host of 32-lane waves: a slot a lane
+    // ([`water_tile_slots`]), so no tile is lost between the two host waves of a group.
+    host_form(&c, &mut native);
     let p = crate::spill::build(&native)?;
     // Structurisation first: tracing per-lane descriptors needs it (its
     // failure is reported after the earlier stages').
@@ -2540,6 +2555,142 @@ mod tests {
             }
             eprintln!("offsets {s0} and {s1}, four dwords a call: {wide}: {:x?}", &out[0][..28]);
             assert_eq!(out[0][..28], want[..], "offsets {s0} and {s1}, four dwords a call: {wide}");
+        }
+    }
+
+    // Exercise the fixup with independent q/den/num, not only a complete
+    // division sequence: the important q=NaN corner cannot be assumed away.
+    fn div_fixup_corner_fixture() -> super::lower::Lowered {
+        let words: &[u32] = &[
+            0xBE85_0380,
+            0xF408_0202, 0xFA00_0000,
+            0xF408_0302, 0xFA00_0020,
+            0x340E_0084, // v7 = 16 * lane
+            0xE038_1000, 0x8002_0107, // load v1..v4 (q, denominator, numerator, pad)
+            0xD55F_0001, 0x040E_0501, // fixup v1, v1, v2, v3
+            0x340E_0082,
+            0xE070_1000, 0x8003_0107,
+            0xBF81_0000,
+        ];
+        let native = super::NativeProgram {
+            stage: super::HwStage::Cs,
+            wave64: false,
+            vgprs: 9,
+            layout: vec![
+                crate::RootParam {
+                    root: crate::RootType::Constants,
+                    table_offset_dwords: 0,
+                    sgprs: 4,
+                    base_register: 0,
+                    user_data: 0,
+                    slot: 0,
+                },
+                crate::RootParam {
+                    root: crate::RootType::Table,
+                    table_offset_dwords: 0,
+                    sgprs: 1,
+                    base_register: 0,
+                    user_data: 4,
+                    slot: 1,
+                },
+            ],
+            used: vec![
+                crate::UsedResource {
+                    kind: crate::ResourceType::Srv,
+                    root: crate::RootType::Table,
+                    table_offset_dwords: 0,
+                    lower_bound: 0,
+                    stride: 4,
+                    dwords: 4,
+                    user_data: 4,
+                    slot: 1,
+                },
+                crate::UsedResource {
+                    kind: crate::ResourceType::Uav,
+                    root: crate::RootType::Table,
+                    table_offset_dwords: 8,
+                    lower_bound: 0,
+                    stride: 4,
+                    dwords: 4,
+                    user_data: 4,
+                    slot: 1,
+                },
+            ],
+            io: crate::native::StageIo::Cs(crate::native::ComputeIo {
+                rsrc2: 5 << 1,
+                threads: [12, 1, 1],
+            }),
+            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        let p = crate::ir::build(&native.code, native.wave64, native.vgprs).unwrap();
+        let res = crate::resource::track(&p, &native.layout, native.stage, None).unwrap();
+        let io = crate::io::raise(&p, &native).unwrap();
+        let st = crate::structure::structure(&p).unwrap();
+        let l = super::lower::lower(&super::lower::Parts {
+            native: &native,
+            p: &p,
+            st: &st,
+            io: &io,
+            res: &res,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            prims: Vec::new(),
+            mesh_stride: 0,
+        })
+        .unwrap();
+        l
+    }
+
+    #[test]
+    fn div_fixup_corner_program_lowers_without_gpu() {
+        let l = div_fixup_corner_fixture();
+        assert!(!l.dxil.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an explicitly available D3D12 adapter"]
+    fn div_fixup_corner_program_executes_on_gpu() {
+        let l = div_fixup_corner_fixture();
+        let dxil = l.dxil;
+        let host = super::host::Host::new(false).expect("D3D12 adapter required for this test");
+        let cs = super::HostShader {
+            stage: super::HwStage::Cs,
+            dxil,
+            user_data: l.user_data,
+            samplers: Vec::new(),
+            static_samplers: Vec::new(),
+            root_cbvs: l.root_cbvs,
+            root_srvs: l.root_srvs,
+            root_uavs: l.root_uavs,
+            root_indexed_views: Vec::new(),
+        };
+        let (root, pso) = host.compute_pipeline(&cs).unwrap();
+        let cases: [(u32, u32, u32, u32); 12] = [
+            (0x7fc00000, 0x3f800000, 0x00000000, 0x00000000),
+            (0x7fc00000, 0xbf800000, 0x00000000, 0x80000000),
+            (0x7fc00000, 0xbf800000, 0x80000000, 0x00000000),
+            (0x7fc00000, 0x7f800000, 0x3f800000, 0x00000000),
+            (0x7fc00000, 0xff800000, 0x40400000, 0x80000000),
+            (0x7fc00000, 0x00000000, 0x3f800000, 0x7f800000),
+            (0x7fc00000, 0x3f800000, 0x7f800000, 0x7f800000),
+            (0x7fc00000, 0x3f800000, 0x3f800000, 0x7f800000),
+            (0x7fc00000, 0x00000000, 0x00000000, 0xffc00000),
+            (0x7fc00000, 0x7f800000, 0x7f800000, 0xffc00000),
+            (0x40000000, 0x3f800000, 0x7fa00000, 0x7fe00000),
+            (0x40000000, 0xffa00000, 0x3f800000, 0xffe00000),
+        ];
+        let inputs: Vec<u32> = cases.iter().flat_map(|&(q, d, n, _)| [q, d, n, 0]).collect();
+        let out = host.dispatch(&root, &pso, &super::host::Dispatch {
+            roots: vec![(0, super::host::Root::Constants(vec![0, 0, 0, 0, 0]))],
+            views: &[
+                super::host::View::Buffer { data: &inputs, stride: super::host::Stride::Raw },
+                super::host::View::RawUav(64),
+            ],
+            samplers: &[], groups: [1, 1, 1],
+        }).unwrap();
+        for (i, case) in cases.iter().enumerate() {
+            assert_eq!(out[0][i], case.3, "q={:#010x} den={:#010x} num={:#010x}", case.0, case.1, case.2);
         }
     }
 
