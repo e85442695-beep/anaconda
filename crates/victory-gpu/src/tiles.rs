@@ -223,9 +223,64 @@ pub(crate) fn min_kept_level(levels: u32, max_dim: u32) -> u32 {
     min_kept_level_for(levels, max_dim, drop, min_dim, max_dim_cap)
 }
 
+/// When VRAM is tight (`!room`) and `VICTORY_TILES_TAIL_ALWAYS=1`, returns the
+/// minimal level bitmask to map so a tiled texture with `held != 0` never stays
+/// completely unmapped (`first_shown() == None`, which D3D12 Tier 2 reads as
+/// `(0, 0, 0, 0)` pitch black).
+///
+/// If any held level already has tiles, returns `0` (no extra VRAM spent).
+/// Otherwise prefers the packed mip tail (`<= 8` tiles = 512 KiB), falling back
+/// to the single smallest held standard mip (`<= 8` tiles).
+fn tail_fallback_mask_for(
+    standard: &[u32],
+    packed: u32,
+    levels: u32,
+    given_levels: &[bool],
+    given_packed: bool,
+    held: u32,
+) -> u32 {
+    const MAX_TAIL_TILES: u32 = 8;
+    let every = if levels >= 32 { u32::MAX } else { (1u32 << levels) - 1 };
+    let held = held & every;
+    if held == 0 {
+        return 0;
+    }
+    let first_packed = standard.len() as u32;
+    let limit = levels.min(32);
+    // Already has at least one held level backed by tiles: visible, no fallback needed.
+    for level in 0..limit {
+        if (held & (1u32 << level)) == 0 {
+            continue;
+        }
+        let backed = if level < first_packed {
+            given_levels.get(level as usize).copied().unwrap_or(false)
+        } else {
+            given_packed
+        };
+        if backed {
+            return 0;
+        }
+    }
+    // Prefer the packed mip tail when any packed mip is held and small enough.
+    if !given_packed && packed > 0 && packed <= MAX_TAIL_TILES && first_packed < limit {
+        let tail_mask = every & !((1u32 << first_packed) - 1);
+        let held_tail = held & tail_mask;
+        if held_tail != 0 {
+            return held_tail;
+        }
+    }
+    // Otherwise map only the single smallest held standard level if <= MAX_TAIL_TILES.
+    for level in (0..first_packed.min(limit)).rev() {
+        if (held & (1u32 << level)) != 0 && standard[level as usize] <= MAX_TAIL_TILES {
+            return 1u32 << level;
+        }
+    }
+    0
+}
+
 /// When `VICTORY_TILES_TAIL_ALWAYS=1`, allow mapping the tiny packed mip tail
-/// (<= 2 tiles = 128 KiB) even when VRAM is tight so character/world textures
-/// never render solid black.
+/// (or smallest held standard mip, <= 8 tiles = 512 KiB) even when VRAM is
+/// tight so character/world textures never render solid black.
 pub(crate) fn tail_always() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_TILES_TAIL_ALWAYS").is_some_and(|v| v == "1"))
@@ -240,6 +295,12 @@ pub(crate) fn given_total() -> u64 {
 /// The bytes of tile pool heaps currently allocated on the card.
 pub(crate) fn heaps_total() -> u64 {
     STATS[3].load(Ordering::Relaxed)
+}
+
+/// Free bytes already allocated inside existing tile pool heaps (mapping into
+/// these tiles costs 0 bytes of new VRAM).
+pub(crate) fn free_pool_bytes() -> u64 {
+    heaps_total().saturating_sub(given_total())
 }
 
 /// Number of tile pool heaps reclaimed and returned to the card so far.
@@ -533,15 +594,20 @@ impl Tiled {
         let named = held | card;
         // The levels the card itself writes are few and are not kept
         // waiting: a write of the card's into no memory is lost.
-        // With `VICTORY_TILES_TAIL_ALWAYS=1`, also allow the tiny packed tail
-        // (<= 128 KiB) when `!room` so no tiled texture stays pitch black.
+        // With `VICTORY_TILES_TAIL_ALWAYS=1`, when `!room` and the texture
+        // currently has zero mapped held levels (would sample pitch black),
+        // map either its packed tail (<= 8 tiles) or its single smallest held
+        // standard mip (<= 8 tiles) so no streamed texture renders solid black.
         let mut may = if room { named } else { card };
-        if !room && tail_always() && !given.packed && self.packed > 0 && self.packed <= 2 {
-            let first_packed = self.standard.len() as u32;
-            if first_packed < self.levels && first_packed < 32 {
-                let tail_mask = self.every_level() & !((1u32 << first_packed) - 1);
-                may |= held & tail_mask;
-            }
+        if !room && tail_always() {
+            may |= tail_fallback_mask_for(
+                &self.standard,
+                self.packed,
+                self.levels,
+                &given.levels,
+                given.packed,
+                held,
+            );
         }
         let changed = self.give_locked(&mut given, queue, device, texture, named, may);
         let missing = self.without_locked(&given, named) != 0;
@@ -1919,5 +1985,42 @@ void look() {
         assert_eq!(trim_held_levels_for((1u32 << 11) - 1, 11, 1024, 0, 512, 256), ((1u32 << 11) - 1) & !0b11);
         assert_eq!(trim_held_levels_for(0b111111, 10, 512, 0, 512, 256), 0b111110);
         assert_eq!(trim_held_levels_for(0b11111, 9, 256, 0, 512, 256), 0b11111);
+    }
+
+    #[test]
+    fn tail_fallback_guarantees_visible_mip_for_packed_and_standard_only_textures() {
+        // 1. Standard 1-2 tile packed tail: maps packed tail when unmapped.
+        assert_eq!(
+            tail_fallback_mask_for(&[16, 4, 1], 2, 10, &[false, false, false], false, 0b1111111111),
+            0b1111111000
+        );
+        // 2. Wider packed tail (3..=8 tiles): still maps packed tail instead of staying black.
+        assert_eq!(
+            tail_fallback_mask_for(&[16, 4], 6, 9, &[false, false], false, 0b111111111),
+            0b111111100
+        );
+        // 3. Standard-only held mips (no packed mip held or packed == 0): maps single smallest held standard mip.
+        assert_eq!(
+            tail_fallback_mask_for(&[16, 4, 1], 0, 3, &[false, false, false], false, 0b111),
+            0b100
+        );
+        assert_eq!(
+            tail_fallback_mask_for(&[16, 4, 2], 1, 9, &[false, false, false], false, 0b011),
+            0b010
+        );
+        // 4. Already has a held mip backed: returns 0 so `!room` spends no extra VRAM.
+        assert_eq!(
+            tail_fallback_mask_for(&[16, 4, 1], 2, 10, &[false, false, false], true, 0b1111111111),
+            0
+        );
+        assert_eq!(
+            tail_fallback_mask_for(&[16, 4, 1], 0, 3, &[false, false, true], false, 0b111),
+            0
+        );
+        // 5. Enormous single mip (> 8 tiles) without smaller mips: refuses to protect VRAM.
+        assert_eq!(
+            tail_fallback_mask_for(&[64], 0, 1, &[false], false, 0b1),
+            0
+        );
     }
 }

@@ -10,6 +10,10 @@
 //! - `VICTORY_FPS_HUD=left`: top-left corner.
 //! - `VICTORY_FPS_HUD=bottom-right` / `bottom-left`: bottom corners.
 //! - `VICTORY_FPS_HUD=0` / `off`: disabled at startup.
+//! The badge also carries a hardware panel on its lower lines: the processor
+//! Windows reports, the adapter the device runs on, installed RAM and the
+//! thread count. Nothing is sampled per frame; it is read once at startup.
+//!
 //! - Hotkey **`F4`** toggles visibility live while the game window has focus.
 
 use std::sync::OnceLock;
@@ -30,8 +34,8 @@ const GLYPH_W: u32 = 5;
 const GLYPH_H: u32 = 7;
 const CELL_W: u32 = 6;
 const CELL_H: u32 = 9;
-const COLS: u32 = 16;
-const LINES: u32 = 2;
+const COLS: u32 = 24;
+const LINES: usize = 7;
 const PAD_X: u32 = 6;
 const PAD_Y: u32 = 4;
 const MARGIN: u32 = 12;
@@ -98,12 +102,23 @@ const fn glyph(c: u8) -> [u8; 7] {
         b'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
         b'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
         b'G' => [0b01111, 0b10000, 0b10000, 0b10011, 0b10001, 0b10001, 0b01111],
+        b'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+        b'I' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
+        b'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
+        b'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
         b'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
+        b'N' => [0b10001, 0b11001, 0b10101, 0b10101, 0b10011, 0b10001, 0b10001],
+        b'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
         b'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
         b'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
         b'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
+        b'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+        b'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
         b'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
+        b'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001],
         b'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
+        b'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
+        b'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
         b'.' => [0, 0, 0, 0, 0, 0b01100, 0b01100],
         b':' => [0, 0b00100, 0b00100, 0, 0b00100, 0b00100, 0],
         b'/' => [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000],
@@ -114,7 +129,7 @@ const fn glyph(c: u8) -> [u8; 7] {
 }
 
 const fn box_dots() -> (u32, u32) {
-    (COLS * CELL_W + 2 * PAD_X, LINES * CELL_H + 2 * PAD_Y - 2)
+    (COLS * CELL_W + 2 * PAD_X, LINES as u32 * CELL_H + 2 * PAD_Y - 2)
 }
 
 const fn box_pixels(scale: u32) -> (u32, u32) {
@@ -178,8 +193,72 @@ fn encode_pixel(format: DXGI_FORMAT, [r, g, b]: [u8; 3], out: &mut [u8]) {
     }
 }
 
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Processor name Windows keeps for the first socket.
+fn cpu_spec() -> String {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    let key = wide(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
+    let name = wide("ProcessorNameString");
+    let mut value = [0u16; 128];
+    let mut bytes = (value.len() * 2) as u32;
+    // SAFETY: NUL-terminated key and value names; the buffer has room for the
+    // bytes `RegGetValueW` is told it may write.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            value.as_mut_ptr().cast(),
+            &mut bytes,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return "CPU UNKNOWN".to_owned();
+    }
+    let len = (bytes as usize / 2).min(value.len());
+    let name = String::from_utf16_lossy(&value[..len]);
+    let name = name.trim_end_matches('\0').trim();
+    format!("CPU {}", name.chars().take(COLS as usize - 4).collect::<String>())
+}
+
+/// Installed physical memory, in GiB.
+fn ram_spec() -> String {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: the structure's length is set to its real size.
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return "RAM -- GB".to_owned();
+    }
+    format!("RAM {} GB", (status.ullTotalPhys / (1 << 30)).max(1))
+}
+
+/// Short card name, from the adapter the device actually runs on.
+fn gpu_spec(host: &Host) -> String {
+    let Some(adapter) = host.adapter() else {
+        return "GPU UNKNOWN".to_owned();
+    };
+    // SAFETY: a live adapter the host owns.
+    let Ok(desc) = (unsafe { adapter.GetDesc() }) else {
+        return "GPU UNKNOWN".to_owned();
+    };
+    let name = String::from_utf16_lossy(&desc.Description);
+    let name = name.trim_end_matches('\0').trim();
+    let short = match name.find("GTX").or_else(|| name.find("RTX")) {
+        Some(at) => &name[at..],
+        None => name,
+    };
+    format!("GPU {}", short.chars().take(COLS as usize - 4).collect::<String>())
+}
+
 fn paint_hud(
-    lines: &[String; 2],
+    lines: &[String; LINES],
     accent: [u8; 3],
     scale: u32,
     format: DXGI_FORMAT,
@@ -193,11 +272,13 @@ fn paint_hud(
     let mut bar = [0u8; 8];
     let mut line0_col = [0u8; 8];
     let mut line1_col = [0u8; 8];
+    let mut specs_col = [0u8; 8];
     encode_pixel(format, [16, 18, 24], &mut bg);
     encode_pixel(format, [46, 52, 64], &mut border);
     encode_pixel(format, accent, &mut bar);
     encode_pixel(format, accent, &mut line0_col);
     encode_pixel(format, [205, 214, 226], &mut line1_col);
+    encode_pixel(format, [150, 165, 185], &mut specs_col);
 
     let mut out = vec![0u8; pitch * ph as usize];
     for dy in 0..dh {
@@ -214,7 +295,7 @@ fn paint_hud(
                     let row = ty / CELL_H;
                     let gx = tx % CELL_W;
                     let gy = ty % CELL_H;
-                    if col < COLS && row < LINES && gx < GLYPH_W && gy < GLYPH_H {
+                    if col < COLS && row < LINES as u32 && gx < GLYPH_W && gy < GLYPH_H {
                         if let Some(&ch) = lines[row as usize].as_bytes().get(col as usize) {
                             let bits = glyph(ch.to_ascii_uppercase())[gy as usize];
                             if ((bits >> (GLYPH_W - 1 - gx)) & 1) != 0 {
@@ -225,7 +306,8 @@ fn paint_hud(
                 }
                 match lit {
                     Some(0) => &line0_col[..bytes],
-                    Some(_) => &line1_col[..bytes],
+                    Some(1) => &line1_col[..bytes],
+                    Some(_) => &specs_col[..bytes],
                     None => &bg[..bytes],
                 }
             };
@@ -273,7 +355,7 @@ impl Ring {
         })
     }
 
-    fn write(&mut self, lines: &[String; 2], accent: [u8; 3]) {
+    fn write(&mut self, lines: &[String; LINES], accent: [u8; 3]) {
         let img = paint_hud(lines, accent, self.scale, self.format, self.pitch as usize);
         self.turn = (self.turn + 1) % UPLOADS;
         // SAFETY: mapped upload buffer of exact size `img.len()`.
@@ -291,7 +373,7 @@ pub(crate) struct FpsHud {
     ema_real_fps: f64,
     ema_shown_fps: f64,
     ema_ms: f64,
-    lines: [String; 2],
+    lines: [String; LINES],
     accent: [u8; 3],
     dirty: bool,
     ring: Option<Ring>,
@@ -299,13 +381,15 @@ pub(crate) struct FpsHud {
 }
 
 impl FpsHud {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(host: &Host) -> Self {
         let fg = crate::framegen::enabled();
         let line0 = if fg {
             "FPS --  FG --".to_owned()
         } else {
             "FPS --  --.-MS".to_owned()
         };
+        let threads = std::thread::available_parallelism().map_or(12, |n| n.get());
+        let os = format!("WIN11 {}C{}T", threads / 2, threads);
         Self {
             since: Instant::now(),
             real_frames: 0,
@@ -313,7 +397,15 @@ impl FpsHud {
             ema_real_fps: 0.0,
             ema_shown_fps: 0.0,
             ema_ms: 0.0,
-            lines: [line0, "VRAM -.--GB".to_owned()],
+            lines: [
+                line0,
+                "VRAM -.--GB".to_owned(),
+                cpu_spec(),
+                gpu_spec(host),
+                ram_spec(),
+                os,
+                "D3D12 SM66".to_owned(),
+            ],
             accent: [92, 255, 122],
             dirty: true,
             ring: None,
@@ -512,8 +604,16 @@ mod tests {
                 .unwrap();
         }
         let tex = tex.unwrap();
-        let mut hud = FpsHud::new();
-        hud.lines = ["FPS 30  FG 60".to_owned(), " 33.3MS 3.21GB".to_owned()];
+        let mut hud = FpsHud::new(host);
+        hud.lines = [
+            "FPS 30  FG 60".to_owned(),
+            " 33.3MS 3.21GB".to_owned(),
+            "CPU AMD R5 5500".to_owned(),
+            "GPU GTX1650 4G".to_owned(),
+            "RAM 16 GB".to_owned(),
+            "WIN11 6C12T".to_owned(),
+            "D3D12 SM66".to_owned(),
+        ];
         hud.accent = [92, 255, 122];
         hud.dirty = true;
 

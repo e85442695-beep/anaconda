@@ -9809,7 +9809,7 @@ impl Host {
                 meter: Meter::new(),
                 composer: None,
                 framegen: None,
-                fps_hud: crate::fps_hud::FpsHud::new(),
+                fps_hud: crate::fps_hud::FpsHud::new(self),
                 input_glyphs: crate::input_glyphs::InputGlyphsHud::new(),
                 #[cfg(feature = "diagnostics")]
                 panel: panel::Panel::new(),
@@ -9866,6 +9866,11 @@ pub(crate) fn legal_for(flags: u32, state: u32) -> u32 {
 }
 
 impl Host {
+    /// The adapter the device runs on, for the on-screen hardware panel.
+    pub(crate) fn adapter(&self) -> Option<&IDXGIAdapter3> {
+        self.adapter.as_ref()
+    }
+
     /// The card's memory as the system accounts it to this process, in
     /// bytes: the budget and the use of the card's own memory, then of the
     /// PC's memory shared with the card (where the system moves what does
