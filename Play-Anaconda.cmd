@@ -38,7 +38,7 @@ if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
 if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=768"
 if not defined VICTORY_CARD_WINDOWS_MB set "VICTORY_CARD_WINDOWS_MB=0"
 rem Round 3: give back host views when a list returns its dynamic descriptor slots (0 = old behaviour for A/B)
-if not defined VICTORY_KEEP_RELEASE set "VICTORY_KEEP_RELEASE=texture"
+if not defined VICTORY_KEEP_RELEASE set "VICTORY_KEEP_RELEASE=0"
 
 rem 2. Turing/NVIDIA shader & descriptor optimizations (Early-Z, Wave32 tickets, raw-view clamp, safe pipeline library)
 if not defined VICTORY_SHADER_OPT set "VICTORY_SHADER_OPT=63"
