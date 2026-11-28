@@ -88,7 +88,7 @@ float3 recover_center(float2 uv) {
     return sum / max(total, 1e-6);
 }
 
-// Fast FSR-inspired 5-tap RCAS contrast-adaptive sharpening + NaN guard
+// 5-tap Catmull-Rom bicubic reconstruction + anti-ringing RCAS sharpening + NaN guard
 [RootSignature(RS)]
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -98,24 +98,64 @@ void main(uint3 id : SV_DispatchThreadID) {
     float2 max_uv = max(uv_scale - inv_src * 0.5, min_uv);
     uv = clamp(uv, min_uv, max_uv);
 
-    float4 c = src.SampleLevel(samp, uv, 0.0);
+    float4 bilin = src.SampleLevel(samp, uv, 0.0);
     float3 fallback = 0.0;
-    [branch] if (!all(isfinite(c.rgb))) fallback = recover_center(uv);
-    c.rgb = safe_hdr(c.rgb, fallback);
-    c.a = isfinite(c.a) ? saturate(c.a) : 1.0;
-    if (sharpness > 0.001) {
-        float3 n = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(0.0, -inv_src.y), min_uv, max_uv), 0.0).rgb, c.rgb);
-        float3 s = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(0.0,  inv_src.y), min_uv, max_uv), 0.0).rgb, c.rgb);
-        float3 w = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(-inv_src.x, 0.0), min_uv, max_uv), 0.0).rgb, c.rgb);
-        float3 e = safe_hdr(src.SampleLevel(samp, clamp(uv + float2( inv_src.x, 0.0), min_uv, max_uv), 0.0).rgb, c.rgb);
-        float3 mn = min(c.rgb, min(min(n, s), min(w, e)));
-        float3 mx = max(c.rgb, max(max(n, s), max(w, e)));
-        float3 avg = (n + s + w + e) * 0.25;
-        // RCAS-style clamped unsharp mask (prevents ringing/halos while restoring detail)
-        float3 sharp = c.rgb + (c.rgb - avg) * (sharpness * 1.25);
-        c.rgb = clamp(sharp, mn, mx);
+    bool center_finite = all(isfinite(bilin.rgb));
+    [branch] if (!center_finite) fallback = recover_center(uv);
+    float3 base_rgb = safe_hdr(bilin.rgb, fallback);
+    float base_a = isfinite(bilin.a) ? saturate(bilin.a) : 1.0;
+
+    // 4-neighbor cross taps for anti-ringing bounds and RCAS contrast-adaptive sharpening
+    float3 n = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(0.0, -inv_src.y), min_uv, max_uv), 0.0).rgb, base_rgb);
+    float3 s = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(0.0,  inv_src.y), min_uv, max_uv), 0.0).rgb, base_rgb);
+    float3 w = safe_hdr(src.SampleLevel(samp, clamp(uv + float2(-inv_src.x, 0.0), min_uv, max_uv), 0.0).rgb, base_rgb);
+    float3 e = safe_hdr(src.SampleLevel(samp, clamp(uv + float2( inv_src.x, 0.0), min_uv, max_uv), 0.0).rgb, base_rgb);
+    float3 mn = min(base_rgb, min(min(n, s), min(w, e)));
+    float3 mx = max(base_rgb, max(max(n, s), max(w, e)));
+
+    float3 rgb = base_rgb;
+    // Filmic 5-tap Catmull-Rom bicubic filter when all center texels are finite
+    if (center_finite) {
+        float2 pos = uv / inv_src;
+        float2 tc1 = floor(pos - 0.5) + 0.5;
+        float2 f = pos - tc1;
+        float2 f2 = f * f;
+        float2 f3 = f2 * f;
+        float2 w0 = f2 - 0.5 * (f3 + f);
+        float2 w1 = 1.5 * f3 - 2.5 * f2 + 1.0;
+        float2 w3 = 0.5 * (f3 - f2);
+        float2 w2 = 1.0 - w0 - w1 - w3;
+        float2 w12 = w1 + w2;
+        float2 off12 = w2 / max(w12, 1e-6);
+
+        float2 uv0 = clamp((tc1 - 1.0) * inv_src, min_uv, max_uv);
+        float2 uv3 = clamp((tc1 + 2.0) * inv_src, min_uv, max_uv);
+        float2 uv12 = clamp((tc1 + off12) * inv_src, min_uv, max_uv);
+
+        float3 t0 = src.SampleLevel(samp, float2(uv12.x, uv0.y), 0.0).rgb;
+        float3 t1 = src.SampleLevel(samp, float2(uv0.x, uv12.y), 0.0).rgb;
+        float3 t2 = src.SampleLevel(samp, float2(uv12.x, uv12.y), 0.0).rgb;
+        float3 t3 = src.SampleLevel(samp, float2(uv3.x, uv12.y), 0.0).rgb;
+        float3 t4 = src.SampleLevel(samp, float2(uv12.x, uv3.y), 0.0).rgb;
+        if (all(isfinite(t0)) && all(isfinite(t1)) && all(isfinite(t2)) && all(isfinite(t3)) && all(isfinite(t4))) {
+            float wt0 = w12.x * w0.y;
+            float wt1 = w0.x * w12.y;
+            float wt2 = w12.x * w12.y;
+            float wt3 = w3.x * w12.y;
+            float wt4 = w12.x * w3.y;
+            float wsum = wt0 + wt1 + wt2 + wt3 + wt4;
+            float3 bicubic = (t0 * wt0 + t1 * wt1 + t2 * wt2 + t3 * wt3 + t4 * wt4) / max(wsum, 1e-6);
+            rgb = clamp(safe_hdr(bicubic, base_rgb), mn, mx);
+        }
     }
-    dst[id.xy] = c;
+
+    if (sharpness > 0.001) {
+        float3 avg = (n + s + w + e) * 0.25;
+        // RCAS-style clamped unsharp mask (prevents ringing/halos while restoring edge detail)
+        float3 sharp = rgb + (rgb - avg) * (sharpness * 1.25);
+        rgb = clamp(sharp, mn, mx);
+    }
+    dst[id.xy] = float4(rgb, base_a);
 }
 "#;
 

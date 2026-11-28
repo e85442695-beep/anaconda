@@ -15,9 +15,9 @@
     <hdrBlackLevels value="50" />
     <hdrFilmicMode value="true" />
     <gamma value="15" />
-    <anisotropicFiltering value="0" />
+    <anisotropicFiltering value="8" />
     <desiredFPS value="30" />
-    <fsrQuality value="3" />
+    <fsrQuality value="1" />
     <graphicsQualityPreset value="0.000000" />
   </graphics>
   <advancedGraphics>
@@ -25,27 +25,27 @@
     <versionMinor value="0" />
     <asyncComputeEnabled value="true" />
     <damageModelsEnabled value="true" />
-    <decorationResolutionShift value="2" />
+    <decorationResolutionShift value="1" />
     <directionalScreenSpaceShadowQuality value="0.000000" />
-    <fsrSharpen value="0.450000" />
-    <grassLod value="0.200000" />
-    <lodScale value="0.500000" />
-    <texLodScale_Global value="2.000000" />
+    <fsrSharpen value="0.500000" />
+    <grassLod value="0.500000" />
+    <lodScale value="0.850000" />
+    <texLodScale_Global value="1.000000" />
     <texLodScale_Mat_High value="0.500000" />
     <texLodScale_Mat_Med value="1.000000" />
-    <texLodScale_Mat_Low value="2.000000" />
-    <texLodScale_Buildings value="2.000000" />
-    <texLodScale_Objects value="2.000000" />
-    <texLodScale_HD value="2.000000" />
-    <texLodScale_OrphanHD value="2.000000" />
-    <texLodScale_LOD value="4.000000" />
-    <texLodScale_SLOD1 value="8.000000" />
-    <texLodScale_SLOD2 value="16.000000" />
-    <texLodScale_SLOD3 value="32.000000" />
-    <texLodScale_SLOD4 value="64.000000" />
-    <smallCullThreshold value="2.000000" />
-    <maxTexUpgradesPerFrame value="2" />
-    <lensFlaresScreenResDivExponent value="3" />
+    <texLodScale_Mat_Low value="1.000000" />
+    <texLodScale_Buildings value="1.000000" />
+    <texLodScale_Objects value="1.000000" />
+    <texLodScale_HD value="1.000000" />
+    <texLodScale_OrphanHD value="1.000000" />
+    <texLodScale_LOD value="2.000000" />
+    <texLodScale_SLOD1 value="6.000000" />
+    <texLodScale_SLOD2 value="12.000000" />
+    <texLodScale_SLOD3 value="24.000000" />
+    <texLodScale_SLOD4 value="48.000000" />
+    <smallCullThreshold value="1.000000" />
+    <maxTexUpgradesPerFrame value="8" />
+    <lensFlaresScreenResDivExponent value="2" />
     <motionBlur value="false" />
     <motionBlurLimit value="0.000000" />
     <motionBlurScale value="0.000000" />
@@ -55,11 +55,11 @@
     <shadowLongShadows value="false" />
     <shadowParticleShadows value="false" />
     <sharpenEnabled value="true" />
-    <sharpenIntensity value="0.600000" />
+    <sharpenIntensity value="0.650000" />
     <ssroSampleCount value="1" />
     <transferQueuesEnabled value="true" />
     <treeTessellationEnabled value="false" />
-    <vehicleLodBias value="1.000000" />
+    <vehicleLodBias value="0.000000" />
     <vehicleHDCount value="0" />
     <volumetricsRaymarchResolutionUnclamped value="false" />
     <waterReflectionResX value="256" />
@@ -68,7 +68,7 @@
     <worldHeightShadowQuality value="0.000000" />
     <mapMSAA value="false" />
     <vrsEnabled value="false" />
-    <manualMipBias value="1.000000" />
+    <manualMipBias value="0.000000" />
   </advancedGraphics>
   <video>
     <versionMajor value="6" />
