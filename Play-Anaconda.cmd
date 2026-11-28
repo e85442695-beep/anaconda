@@ -79,7 +79,8 @@ if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
 if not defined VICTORY_CARD_AWAKE set "VICTORY_CARD_AWAKE=1"
 if not defined VICTORY_SHOW_AFTER set "VICTORY_SHOW_AFTER=1"
 
-rem 5. Built-in Series S Bicubic+RCAS FSR upscaler + AMD FSR 3-style 2x Optical Flow Frame Generation + on-screen FPS & PC Specs HUD (F4 toggle)
+rem 5. Built-in Series S Temporal TAAU (FSR-style Halton jitter + motion reprojection + Bicubic + RCAS) + 2x Optical Flow FrameGen + PC Specs HUD (F4)
+if not defined VICTORY_FSR_TAAU set "VICTORY_FSR_TAAU=1"
 if not defined VICTORY_FSR_SCALE set "VICTORY_FSR_SCALE=1.25"
 if not defined VICTORY_FSR_SHARPEN set "VICTORY_FSR_SHARPEN=0.50"
 if not defined VICTORY_FRAME_GEN set "VICTORY_FRAME_GEN=2"

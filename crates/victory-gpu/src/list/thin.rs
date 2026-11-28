@@ -471,28 +471,28 @@ const CLEAR_DSV: u64 = after(15);
 const COPY_TEXTURE: u64 = after(16);
 const BUILTIN_UPSCALE: u64 = after(17);
 
-/// Records a built-in FidelityFX compute upscale into a thin list when
+/// Records a built-in FidelityFX compute upscale (including temporal TAAU
+/// motion/reactive inputs and sub-pixel jitter) into a thin list when
 /// `VICTORY_THIN=1` is active; returns `false` if lists record immediately.
-pub(crate) fn record_upscale(
-    this: This,
-    color: This,
-    color_state: u32,
-    output: This,
-    output_state: u32,
-    render: [u32; 2],
-    out_size: [u32; 2],
-) -> bool {
+pub(crate) fn record_upscale(this: This, input: &crate::external::UpscaleInput) -> bool {
     if !on() {
         return false;
     }
     front(this).put(
         BUILTIN_UPSCALE,
         &[
-            color as u64,
-            output as u64,
-            u64::from(color_state) | (u64::from(output_state) << 32),
-            u64::from(render[0]) | (u64::from(render[1]) << 32),
-            u64::from(out_size[0]) | (u64::from(out_size[1]) << 32),
+            input.color as u64,
+            input.output as u64,
+            u64::from(input.color_state) | (u64::from(input.output_state) << 32),
+            u64::from(input.render[0]) | (u64::from(input.render[1]) << 32),
+            u64::from(input.out_size[0]) | (u64::from(input.out_size[1]) << 32),
+            input.motion as u64,
+            input.reactive as u64,
+            u64::from(input.motion_state) | (u64::from(input.reactive_state) << 32),
+            u64::from(input.jitter[0].to_bits()) | (u64::from(input.jitter[1].to_bits()) << 32),
+            u64::from(input.motion_scale[0].to_bits())
+                | (u64::from(input.motion_scale[1].to_bits()) << 32),
+            u64::from(input.flags) | (u64::from(u32::from(input.reset)) << 32),
         ],
     );
     true
@@ -807,15 +807,31 @@ fn translate(list: This, stream: &[u64], left: impl Fn() -> bool) -> (u64, bool)
                     at(w, 2 + 2 * step, boxed),
                 );
             }
-            BUILTIN_UPSCALE if w.len() >= 5 => {
+            BUILTIN_UPSCALE if w.len() >= 11 => {
                 crate::external::upscale_builtin_now(
                     list,
-                    w[0] as This,
-                    w[2] as u32,
-                    w[1] as This,
-                    (w[2] >> 32) as u32,
-                    [w[3] as u32, (w[3] >> 32) as u32],
-                    [w[4] as u32, (w[4] >> 32) as u32],
+                    &crate::external::UpscaleInput {
+                        color: w[0] as This,
+                        color_state: w[2] as u32,
+                        motion: w[5] as This,
+                        motion_state: w[7] as u32,
+                        reactive: w[6] as This,
+                        reactive_state: (w[7] >> 32) as u32,
+                        output: w[1] as This,
+                        output_state: (w[2] >> 32) as u32,
+                        render: [w[3] as u32, (w[3] >> 32) as u32],
+                        out_size: [w[4] as u32, (w[4] >> 32) as u32],
+                        jitter: [
+                            f32::from_bits(w[8] as u32),
+                            f32::from_bits((w[8] >> 32) as u32),
+                        ],
+                        motion_scale: [
+                            f32::from_bits(w[9] as u32),
+                            f32::from_bits((w[9] >> 32) as u32),
+                        ],
+                        flags: w[10] as u32,
+                        reset: (w[10] >> 32) != 0,
+                    },
                 );
             }
             _ => {}

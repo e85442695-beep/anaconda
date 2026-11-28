@@ -12,6 +12,7 @@ use std::ffi::{CStr, c_char, c_void};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use victory_gpu::object::Object;
 
@@ -339,6 +340,41 @@ fn quality_ratio(mode: u32) -> f32 {
     base.max(min_scale)
 }
 
+static CREATE_FLAGS: AtomicU32 = AtomicU32::new(0);
+
+fn taau_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_FSR_TAAU").is_none_or(|v| v != "0"))
+}
+
+fn halton(mut index: i32, base: i32) -> f32 {
+    let mut f = 1.0f32;
+    let mut r = 0.0f32;
+    let inv = 1.0f32 / (base as f32);
+    while index > 0 {
+        f *= inv;
+        r += f * ((index % base) as f32);
+        index /= base;
+    }
+    r
+}
+
+fn jitter_phase_count(render_width: u32, output_width: u32) -> i32 {
+    if !taau_enabled() {
+        return 1;
+    }
+    let ratio = (output_width.max(1) as f32) / (render_width.max(1) as f32);
+    (8.0 * ratio * ratio).ceil().clamp(8.0, 32.0) as i32
+}
+
+fn jitter_offset(index: i32, phases: i32) -> (f32, f32) {
+    if !taau_enabled() || phases <= 1 {
+        return (0.0, 0.0);
+    }
+    let slot = index.rem_euclid(phases) + 1;
+    (halton(slot, 2) - 0.5, halton(slot, 3) - 0.5)
+}
+
 extern "C" fn ffxCreateContext(
     context: *mut *mut c_void,
     desc: *mut Header,
@@ -360,12 +396,14 @@ extern "C" fn ffxCreateContext(
     let mut upscale = unsafe { desc.cast::<CreateUpscale>().read() };
     match mode {
         Mode::Builtin => {
+            CREATE_FLAGS.store(upscale.flags, Ordering::Relaxed);
             // SAFETY: checked non-null.
             unsafe { *context = BUILTIN_CTX as *mut c_void };
             tracing::warn!(
                 render = ?upscale.max_render,
                 output = ?upscale.max_output,
                 flags = format_args!("{:#x}", upscale.flags),
+                taau = taau_enabled(),
                 "FidelityFX: built-in upscaler context created"
             );
             OK
@@ -482,19 +520,21 @@ extern "C" fn ffxQuery(context: *mut *mut c_void, desc: *mut Header) -> u32 {
             QUERY_JITTER_PHASE_COUNT => {
                 // SAFETY: PhaseCount layout.
                 let q = unsafe { &mut *desc.cast::<PhaseCount>() };
+                let phases = jitter_phase_count(q.render_width, q.output_width);
                 if !q.count.is_null() {
-                    unsafe { *q.count = 1 };
+                    unsafe { *q.count = phases };
                 }
                 OK
             }
             QUERY_JITTER_OFFSET => {
                 // SAFETY: JitterOffset layout.
                 let q = unsafe { &mut *desc.cast::<JitterOffset>() };
+                let (jx, jy) = jitter_offset(q.index, q.phases);
                 if !q.x.is_null() {
-                    unsafe { *q.x = 0.0 };
+                    unsafe { *q.x = jx };
                 }
                 if !q.y.is_null() {
-                    unsafe { *q.y = 0.0 };
+                    unsafe { *q.y = jy };
                 }
                 OK
             }
@@ -541,6 +581,8 @@ extern "C" fn ffxDispatch(context: *mut *mut c_void, desc: *mut Header) -> u32 {
     match mode {
         Mode::Builtin => {
             let color = dispatch.resources[0];
+            let motion = dispatch.resources[2];
+            let reactive = dispatch.resources[4];
             let output = dispatch.resources[6];
             if color.resource.is_null() || output.resource.is_null() {
                 once!(warn, "FidelityFX builtin: dispatch missing color or output resource");
@@ -554,23 +596,53 @@ extern "C" fn ffxDispatch(context: *mut *mut c_void, desc: *mut Header) -> u32 {
                 once!(warn, state = format_args!("{:#x}", output.state), "FidelityFX builtin: unknown output state");
                 return PARAMETER;
             };
+            let (motion_ptr, ms) = if !motion.resource.is_null() {
+                match host_state(motion.state) {
+                    Some(s) => (motion.resource.cast::<Object>().cast_const(), s),
+                    None => (null(), 0),
+                }
+            } else {
+                (null(), 0)
+            };
+            let (reactive_ptr, rs) = if !reactive.resource.is_null() {
+                match host_state(reactive.state) {
+                    Some(s) => (reactive.resource.cast::<Object>().cast_const(), s),
+                    None => (null(), 0),
+                }
+            } else {
+                (null(), 0)
+            };
+            let flags = CREATE_FLAGS.load(Ordering::Relaxed);
             once!(
                 warn,
                 render = ?dispatch.render,
                 output = ?dispatch.output,
+                jitter = ?dispatch.jitter,
+                motion_scale = ?dispatch.motion_scale,
+                has_motion = !motion_ptr.is_null(),
+                has_reactive = !reactive_ptr.is_null(),
+                create_flags = format_args!("{flags:#x}"),
                 color_state = format_args!("{:#x}", color.state),
                 output_state = format_args!("{:#x}", output.state),
-                "FidelityFX: first built-in upscaling dispatch"
+                "FidelityFX: first built-in TAAU upscaling dispatch"
             );
-            if victory_gpu::external::upscale_builtin(
-                list,
-                color.resource.cast::<Object>(),
-                cs,
-                output.resource.cast::<Object>(),
-                os,
-                dispatch.render,
-                dispatch.output,
-            ) {
+            let input = victory_gpu::external::UpscaleInput {
+                color: color.resource.cast::<Object>(),
+                color_state: cs,
+                motion: motion_ptr,
+                motion_state: ms,
+                reactive: reactive_ptr,
+                reactive_state: rs,
+                output: output.resource.cast::<Object>(),
+                output_state: os,
+                render: dispatch.render,
+                out_size: dispatch.output,
+                jitter: dispatch.jitter,
+                motion_scale: dispatch.motion_scale,
+                flags,
+                reset: dispatch.reset != 0,
+            };
+            if victory_gpu::external::upscale_builtin(list, &input) {
                 OK
             } else {
                 once!(warn, "FidelityFX builtin: upscale_builtin returned false");
@@ -609,5 +681,28 @@ pub(crate) fn module() -> HleModule {
             hle_export!(ffxDispatch),
             hle_export!(ffxQuery),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn halton_jitter_matches_fsr_phase_spec_and_bounds() {
+        assert_eq!(jitter_phase_count(1280, 1920), 18);
+        assert_eq!(jitter_phase_count(1280, 1280), 8);
+        assert_eq!(jitter_phase_count(640, 1920), 32);
+        for i in 0..32 {
+            let (jx, jy) = jitter_offset(i, 18);
+            assert!(
+                (-0.5..=0.5).contains(&jx) && (-0.5..=0.5).contains(&jy),
+                "jitter out of [-0.5, 0.5] at phase {i}: ({jx}, {jy})"
+            );
+        }
+        // Phase 0 maps to Halton(1,2)-0.5 = 0.0, Halton(1,3)-0.5 = -1/6
+        let (x0, y0) = jitter_offset(0, 18);
+        assert!((x0 - 0.0).abs() < 1e-6);
+        assert!((y0 - (1.0 / 3.0 - 0.5)).abs() < 1e-6);
     }
 }
