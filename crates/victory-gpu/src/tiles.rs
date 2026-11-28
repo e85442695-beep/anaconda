@@ -229,8 +229,9 @@ pub(crate) fn min_kept_level(levels: u32, max_dim: u32) -> u32 {
 /// `(0, 0, 0, 0)` pitch black).
 ///
 /// If any held level already has tiles, returns `0` (no extra VRAM spent).
-/// Otherwise prefers the packed mip tail (`<= 8` tiles = 512 KiB), falling back
-/// to the single smallest held standard mip (`<= 8` tiles).
+/// Otherwise prefers the packed mip tail (`<= 2` tiles = 128 KiB), falling back
+/// to the single smallest held standard mip (`<= 2` tiles). Two tiles is enough
+/// for thousands of textures to each get a visible mip inside one small pool.
 fn tail_fallback_mask_for(
     standard: &[u32],
     packed: u32,
@@ -239,7 +240,7 @@ fn tail_fallback_mask_for(
     given_packed: bool,
     held: u32,
 ) -> u32 {
-    const MAX_TAIL_TILES: u32 = 8;
+    const MAX_TAIL_TILES: u32 = 2;
     let every = if levels >= 32 { u32::MAX } else { (1u32 << levels) - 1 };
     let held = held & every;
     if held == 0 {
@@ -279,7 +280,7 @@ fn tail_fallback_mask_for(
 }
 
 /// When `VICTORY_TILES_TAIL_ALWAYS=1`, allow mapping the tiny packed mip tail
-/// (or smallest held standard mip, <= 8 tiles = 512 KiB) even when VRAM is
+/// (or smallest held standard mip, <= 2 tiles = 128 KiB) even when VRAM is
 /// tight so character/world textures never render solid black.
 pub(crate) fn tail_always() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2041,19 +2042,21 @@ void look() {
             tail_fallback_mask_for(&[16, 4, 1], 2, 10, &[false, false, false], false, 0b1111111111),
             0b1111111000
         );
-        // 2. Wider packed tail (3..=8 tiles): still maps packed tail instead of staying black.
+        // 2. Wider packed tail (> 2 tiles) is skipped so one heap can cover
+        //    thousands of textures; those without a small mip stay waiting.
         assert_eq!(
             tail_fallback_mask_for(&[16, 4], 6, 9, &[false, false], false, 0b111111111),
-            0b111111100
+            0
         );
         // 3. Standard-only held mips (no packed mip held or packed == 0): maps single smallest held standard mip.
         assert_eq!(
             tail_fallback_mask_for(&[16, 4, 1], 0, 3, &[false, false, false], false, 0b111),
             0b100
         );
+        // No held mip fits in two tiles here, so nothing is mapped.
         assert_eq!(
             tail_fallback_mask_for(&[16, 4, 2], 1, 9, &[false, false, false], false, 0b011),
-            0b010
+            0
         );
         // 4. Already has a held mip backed: returns 0 so `!room` spends no extra VRAM.
         assert_eq!(
